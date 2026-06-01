@@ -6,7 +6,8 @@
 **Primary Domain:** Hardware Lifecycle / Firmware Management.
 **Boundaries:** This service acts as an OCI-to-HTTP proxy and Redfish orchestrator. It does NOT automatically reboot nodes, track complex cross-component dependencies, perform in-band OS-level script updates, or host static binary files on local disk.
 
-**Fabrica Configuration:**
+**Fabrica Configuration (MANDATORY):**
+You must use the Fabrica framework to build this service.
 
 * **Project Name:** firmware-manager
 * **API Group:** hardware.fabrica.dev
@@ -52,6 +53,9 @@
 
 
 ## 3. Execution & Acceptance Criteria
+
+**Framework Enforcement:** You MUST use the `fabrica` CLI for all project scaffolding and resource generation. DO NOT write a custom Go standard library server, and DO NOT use alternative frameworks 
+**Architecture Adherence:** You must place your business logic exclusively inside the Fabrica-generated reconciler stubs (`pkg/reconcilers/`) and use the generated `ent` ORM for state management. Do not bypass the framework's intended patterns.
 
 Execute the framework scaffolding, resource generation, and code implementation to fulfill Sections 1 and 2. You must achieve the following criteria to complete this task:
 
