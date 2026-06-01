@@ -19,6 +19,7 @@ import (
 	"time"
 
 	_ "firmware-manager/pkg/apiversion"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/openchami/fabrica/pkg/versioning"
@@ -33,9 +34,11 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	. "firmware-manager/internal/middleware"
+
 	"github.com/openchami/fabrica/pkg/events"
 
 	"firmware-manager/pkg/reconcilers"
+
 	"github.com/openchami/fabrica/pkg/reconcile"
 )
 
