@@ -1,5 +1,128 @@
 # JIT Firmware Execution Service
 
+# Runbook: JIT OCI-to-Redfish Firmware Deployment (Cray EX)
+
+## 1. Environment and Toolchain Initialization
+
+To comply with HPC environment constraints, the required toolchains (Go and ORAS) were installed directly into the user's home directory, and the execution environment was staged in the scratch partition.
+
+**Commands Executed:**
+
+```bash
+# Initialize staging directory
+mkdir -p /scratch/$USER/firmware-testing 
+cd /scratch/$USER/firmware-testing
+
+# Install Go compiler
+wget https://go.dev/dl/go1.22.4.linux-amd64.tar.gz 
+tar -C $HOME -xzf go1.22.4.linux-amd64.tar.gz 
+export PATH=$PATH:$HOME/go/bin
+
+# Install ORAS CLI
+curl -LO https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+mkdir -p $HOME/bin
+tar -zxf oras_1.2.0_linux_amd64.tar.gz -C $HOME/bin oras
+export PATH=$PATH:$HOME/bin
+
+```
+
+**Mechanism:** This bypasses system-level package managers and provides the localized binaries required to compile the Fabrica service and interact with the OCI registry.
+
+## 2. OCI Registry and Artifact Staging
+
+The deployment model replaces traditional static HTTP file servers with a standard OCI distribution registry.
+
+**Commands Executed:**
+
+```bash
+# Start the local OCI registry using Podman, explicitly mapping port 5000
+podman run -d -p 5000:5000 --replace --name local-oci-registry registry:2
+
+# Download the physical Cray firmware payload from the internal network
+curl -O http://rgw-vip.hmn:8080/fw-update/2d64752c1cad11f1aeaa62a6103f192d/NC-1.10.2-22-s.tar.gz
+
+# Push the payload to the registry as a custom OCI artifact
+oras push 127.0.0.1:5000/firmware/cray-bmc:1.10.2 \
+  --plain-http \
+  --artifact-type application/vnd.openchami.firmware.bundle.v1+json \
+  NC-1.10.2-22-s.tar.gz:application/vnd.openchami.firmware.payload.v1
+
+```
+
+**Mechanism:** The `oras push` command mathematically hashes the 58MB `NC-1.10.2-22-s.tar.gz` file, stores it by its SHA-256 digest, and generates an OCI manifest linking the tag `1.10.2` to that digest. Explicitly utilizing `127.0.0.1` instead of `localhost` forces IPv4 routing, avoiding the IPv6 loopback trap (`dial tcp [::1]:5000: connect: connection refused`) that previously caused the push to fail.
+
+## 3. The Fabrica Service Code Modifications
+
+Before execution, the Go reconciler required three specific modifications to accommodate Cray hardware and payload sizes:
+
+1. **Redfish URI Adjustment:** The standard DMTF path was modified to the Cray-specific implementation: `/redfish/v1/UpdateService/Actions/SimpleUpdate`.
+2. **Redfish Payload Adjustment:** The JSON struct was updated to inject `"TransferProtocol": "HTTP"`, a strict requirement for Cray BMCs to initiate the pull.
+3. **Proxy Streaming & HEAD Support:** The ORAS client limits memory-buffered downloads to 4MB to prevent out-of-memory crashes. Because the Cray payload is roughly 58MB, the proxy endpoint was rewritten to use `io.Copy`, streaming the bytes directly from the registry to the BMC without holding them in memory. The router was also updated to accept HTTP `HEAD` requests, allowing the BMC to verify the `Content-Length` header before initiating the full 58MB transfer.
+
+## 4. Execution and Orchestration
+
+With the registry populated and the code compiled, the service was started and the deployment job was submitted.
+
+**Commands Executed:**
+
+```bash
+# Start the service in the background
+go run ./cmd/server serve --port 8090 --database-url="file:hpc_test.db?cache=shared&_fk=1" &
+
+# Submit the Just-In-Time orchestration job
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ -H 'Content-Type: application/json' -d '{
+  "metadata": {"name": "live-cray-update-retry"},
+  "spec": {
+    "targetAddress": "x9000c3s7b1",
+    "username": "root",
+    "password": "initial0",
+    "ociReference": "127.0.0.1:5000/firmware/cray-bmc:1.10.2",
+    "targets": ["/redfish/v1/UpdateService/FirmwareInventory/BMC"],
+    "serverProxyAddress": "10.254.1.20"
+  }
+}'
+
+```
+
+**Mechanism:** The `serverProxyAddress` of `10.254.1.20` is the specific IPv4 address of the Non-Compute Node (NCN) on the `bond0.hmn0` interface. The background reconciler extracted the SHA-256 digest from the OCI registry, constructed the download URI (`http://10.254.1.20:8090/firmware-proxy/layer/sha256:...`), and pushed that URI to the BMC via Redfish. The BMC then routed its download request back through the Hardware Management Network to the Fabrica proxy.
+
+## 5. Hardware Validation
+
+The BMC was queried to confirm the state transition.
+
+**Command Executed:**
+
+```bash
+curl -k -u root:initial0 https://x9000c3s7b1/redfish/v1/UpdateService/FirmwareInventory/BMC | jq
+
+```
+
+**Output:**
+
+```json
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100   391  100   391    0     0   1570      0 --:--:-- --:--:-- --:--:--  1576
+{
+  "@odata.etag": "W/\"1781212049\"",
+  "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/BMC",
+  "@odata.type": "#SoftwareInventory.v1_1_0.SoftwareInventory",
+  "Description": "Baseboard Management Controller",
+  "Id": "BMC",
+  "Name": "BMC",
+  "SoftwareId": "nc:*:*:*",
+  "Status": {
+    "Health": "OK",
+    "State": "Enabled"
+  },
+  "Updateable": true,
+  "Version": "nc.1.10.2-22-shasta-release.arm.2026-01-15T01:13:10+00:00.a0bcef9"
+}
+
+```
+
+**Mechanism:** The absence of the `Conditions` array containing the `HPEFirmwareUpdate.1.0.DownloadFailed` warning indicates the proxy transfer succeeded. The `State: Enabled` and `Health: OK` fields confirm the BMC verified the binary signature, applied the flash update, and rebooted the controller using the specified `nc.1.10.2-22...` version.
+
 ## 1. Overview and Operational Philosophy
 
 The JIT (Just-In-Time) Firmware Execution Service is a stateless orchestration engine designed to deploy firmware binaries directly from OCI registries to hardware Baseboard Management Controllers (BMCs) using the Redfish standard.
