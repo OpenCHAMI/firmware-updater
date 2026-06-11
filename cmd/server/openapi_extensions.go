@@ -26,7 +26,9 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
@@ -65,9 +67,9 @@ func registerCustomOpenAPIPaths(spec *openapi3.T) {
 }
 
 func registerFirmwareProxyRoute(r chi.Router) {
-	r.Get("/firmware-proxy/layer/{digest}", func(w http.ResponseWriter, req *http.Request) {
+	handler := func(w http.ResponseWriter, req *http.Request) {
 		digest := chi.URLParam(req, "digest")
-		payload, err := firmwareproxy.FetchPayloadLayer(req.Context(), digest)
+		rc, size, err := firmwareproxy.StreamPayloadLayer(req.Context(), digest)
 		if err != nil {
 			if statusErr, ok := err.(*firmwareproxy.HTTPStatusError); ok {
 				http.Error(w, statusErr.Error(), statusErr.StatusCode)
@@ -76,9 +78,20 @@ func registerFirmwareProxyRoute(r chi.Router) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		defer rc.Close()
 
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+
+		if req.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(payload)
-	})
+		_, _ = io.Copy(w, rc)
+	}
+
+	r.Get("/firmware-proxy/layer/{digest}", handler)
+	r.Head("/firmware-proxy/layer/{digest}", handler)
 }

@@ -166,15 +166,16 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 
 func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) (string, error) {
 	payload := map[string]interface{}{
-		"ImageURI": proxyURI,
-		"Targets":  res.Spec.Targets,
+		"ImageURI":         proxyURI,
+		"Targets":          res.Spec.Targets,
+		"TransferProtocol": "HTTP",
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal Redfish SimpleUpdate body: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate", strings.TrimSpace(res.Spec.TargetAddress))
+	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/Actions/SimpleUpdate", strings.TrimSpace(res.Spec.TargetAddress))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", fmt.Errorf("build Redfish SimpleUpdate request: %w", err)

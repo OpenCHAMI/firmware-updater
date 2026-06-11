@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -76,32 +77,37 @@ func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	return payloadDigest, nil
 }
 
-func FetchPayloadLayer(ctx context.Context, digestStr string) (payload []byte, err error) {
+func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, int64, error) {
 	if _, parseErr := digest.Parse(digestStr); parseErr != nil {
-		return nil, &HTTPStatusError{StatusCode: 400, Message: fmt.Sprintf("invalid digest %q", digestStr)}
+		return nil, 0, &HTTPStatusError{StatusCode: 400, Message: fmt.Sprintf("invalid digest %q", digestStr)}
 	}
 
 	locAny, found := payloadIndex.Load(digestStr)
 	if !found {
-		return nil, &HTTPStatusError{StatusCode: 404, Message: "unknown payload digest"}
+		return nil, 0, &HTTPStatusError{StatusCode: 404, Message: "unknown payload digest"}
 	}
 	loc, ok := locAny.(payloadLocation)
 	if !ok {
-		return nil, fmt.Errorf("invalid payload index entry for digest %q", digestStr)
+		return nil, 0, fmt.Errorf("invalid payload index entry for digest %q", digestStr)
 	}
 
 	repo, err := remote.NewRepository(loc.Repository)
 	if err != nil {
-		return nil, fmt.Errorf("create ORAS repository client: %w", err)
+		return nil, 0, fmt.Errorf("create ORAS repository client: %w", err)
 	}
 	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
 
-	_, payloadBytes, err := oras.FetchBytes(ctx, repo.Blobs(), digestStr, oras.FetchBytesOptions{})
+	desc, err := repo.Blobs().Resolve(ctx, digestStr)
 	if err != nil {
-		return nil, classifyORASError(fmt.Errorf("fetch payload layer %q: %w", digestStr, err))
+		return nil, 0, classifyORASError(fmt.Errorf("resolve payload layer %q: %w", digestStr, err))
 	}
 
-	return payloadBytes, nil
+	rc, err := repo.Blobs().Fetch(ctx, desc)
+	if err != nil {
+		return nil, 0, classifyORASError(fmt.Errorf("stream payload layer %q: %w", digestStr, err))
+	}
+
+	return rc, desc.Size, nil
 }
 
 func isLoopbackRegistry(registryHost string) bool {
