@@ -7,6 +7,7 @@ package v1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/openchami/fabrica/pkg/fabrica"
 )
@@ -28,6 +29,7 @@ type FirmwareUpdateJobSpec struct {
 	OCIReference       string   `json:"ociReference" validate:"required"`
 	Targets            []string `json:"targets" validate:"required,min=1,dive,required"`
 	ServerProxyAddress string   `json:"serverProxyAddress" validate:"required"`
+	UpdateURI          string   `json:"updateURI,omitempty"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
@@ -47,6 +49,10 @@ func (r *FirmwareUpdateJob) Validate(ctx context.Context) error {
 		if target == "" {
 			return fmt.Errorf("spec.targets[%d] must not be empty", i)
 		}
+	}
+
+	if r.Spec.UpdateURI != "" && !strings.HasPrefix(r.Spec.UpdateURI, "/redfish/v1/") {
+		return fmt.Errorf("invalid UpdateURI: must begin with /redfish/v1/")
 	}
 
 	return nil

@@ -63,6 +63,19 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		return nil
 	}
 
+	// Pre-flight: resolve and validate UpdateURI
+	updateURI := strings.TrimSpace(res.Spec.UpdateURI)
+	if updateURI == "" {
+		updateURI = "/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate"
+	} else if !strings.HasPrefix(updateURI, "/redfish/v1/") {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = "invalid UpdateURI: must begin with /redfish/v1/"
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set terminal failure on invalid UpdateURI: %w", updateErr)
+		}
+		return nil
+	}
+
 	res.Status.JobState = "Resolving"
 	res.Status.ErrorDetail = ""
 	if err := r.UpdateStatus(ctx, res); err != nil {
@@ -90,7 +103,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
-	taskID, err := dispatchRedfishWithBackoff(ctx, res, proxyURI)
+	taskID, err := dispatchRedfishWithBackoff(ctx, res, proxyURI, updateURI)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -140,12 +153,12 @@ func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string
 	return "", lastErr
 }
 
-func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) (string, error) {
+func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string, updateURI string) (string, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		taskID, err := dispatchRedfishOnce(ctx, res, proxyURI)
+		taskID, err := dispatchRedfishOnce(ctx, res, proxyURI, updateURI)
 		if err == nil {
 			return taskID, nil
 		}
@@ -164,7 +177,7 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 	return "", lastErr
 }
 
-func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) (string, error) {
+func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string, updateURI string) (string, error) {
 	payload := map[string]interface{}{
 		"ImageURI":         proxyURI,
 		"Targets":          res.Spec.Targets,
@@ -175,7 +188,7 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyUR
 		return "", fmt.Errorf("marshal Redfish SimpleUpdate body: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/Actions/SimpleUpdate", strings.TrimSpace(res.Spec.TargetAddress))
+	endpoint := fmt.Sprintf("https://%s%s", strings.TrimSpace(res.Spec.TargetAddress), updateURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", fmt.Errorf("build Redfish SimpleUpdate request: %w", err)

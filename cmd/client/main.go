@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: MIT
 //
-// This file provides a Cobra-based CLI for the firmware_manager API.
+// This file provides a Cobra-based CLI for the firmware_updater API.
 // Generated from: pkg/codegen/templates/client-cmd.go.tmpl
 //
 // To modify the CLI:
@@ -17,17 +17,17 @@
 //
 // Global flags (available for all commands):
 //
-//	--server       Server URL (env: FIRMWARE_MANAGER_SERVER)
-//	--timeout      Request timeout (env: FIRMWARE_MANAGER_TIMEOUT)
-//	--output, -o   Output format: table, json, yaml (env: FIRMWARE_MANAGER_OUTPUT)
-//	--version, -v  API version to request: v1, v2beta1, etc. (env: FIRMWARE_MANAGER_VERSION)
-//	--token        JWT bearer token (env: FIRMWARE_MANAGER_TOKEN)
-//	--config       Config file path (default: ~/.firmware_manager-cli.yaml)
+//	--server       Server URL (env: FIRMWARE_UPDATER_SERVER)
+//	--timeout      Request timeout (env: FIRMWARE_UPDATER_TIMEOUT)
+//	--output, -o   Output format: table, json, yaml (env: FIRMWARE_UPDATER_OUTPUT)
+//	--version, -v  API version to request: v1, v2beta1, etc. (env: FIRMWARE_UPDATER_VERSION)
+//	--token        JWT bearer token (env: FIRMWARE_UPDATER_TOKEN)
+//	--config       Config file path (default: ~/.firmware_updater-cli.yaml)
 //
 // Configuration sources (in order of precedence):
 //  1. Command-line flags
-//  2. Environment variables (FIRMWARE_MANAGER_*)
-//  3. Config file (~/.firmware_manager-cli.yaml)
+//  2. Environment variables (FIRMWARE_UPDATER_*)
+//  3. Config file (~/.firmware_updater-cli.yaml)
 //  4. Default values
 //
 // Usage examples:
@@ -48,8 +48,8 @@
 //	client firmwareupdatejob create --spec '{"name":"firmwareupdatejob-01","description":"Example FirmwareUpdateJob"}'
 //
 //	# Use environment variables
-//	export FIRMWARE_MANAGER_SERVER=https://firmware_manager.example.com
-//	export FIRMWARE_MANAGER_VERSION=v2beta1
+//	export FIRMWARE_UPDATER_SERVER=https://firmware_updater.example.com
+//	export FIRMWARE_UPDATER_VERSION=v2beta1
 //	client firmwareupdatejob list
 //
 // To add custom commands:
@@ -99,16 +99,16 @@ func main() {
 
 var rootCmd = &cobra.Command{
 	Use:   filepath.Base(os.Args[0]),
-	Short: "firmware_manager CLI",
-	Long:  `A command-line interface for managing firmware_manager resources.`,
+	Short: "firmware_updater CLI",
+	Long:  `A command-line interface for managing firmware_updater resources.`,
 }
 
 func init() {
 	cobra.OnInitialize(initConfig)
 
 	// Global flags
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.firmware_manager-cli.yaml)")
-	rootCmd.PersistentFlags().StringVar(&serverURL, "server", "http://localhost:8080", "firmware_manager server URL")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.firmware_updater-cli.yaml)")
+	rootCmd.PersistentFlags().StringVar(&serverURL, "server", "http://localhost:8080", "firmware_updater server URL")
 	rootCmd.PersistentFlags().DurationVar(&timeout, "timeout", 30*time.Second, "request timeout")
 	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "table", "output format: table, json, yaml")
 	rootCmd.PersistentFlags().StringVarP(&apiVersion, "version", "v", "", "API version to request (e.g., v1, v2beta1)")
@@ -127,7 +127,7 @@ func init() {
 	viper.BindPFlag("log-level", rootCmd.PersistentFlags().Lookup("log-level"))
 
 	// Environment variable support
-	viper.SetEnvPrefix("FIRMWARE_MANAGER")
+	viper.SetEnvPrefix("FIRMWARE_UPDATER")
 	viper.AutomaticEnv()
 
 	// Add resource commands
@@ -148,7 +148,7 @@ func initConfig() {
 
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".firmware_manager-cli")
+		viper.SetConfigName(".firmware_updater-cli")
 	}
 
 	if err := viper.ReadInConfig(); err == nil {
@@ -314,13 +314,19 @@ var firmwareupdatejobCreateCmd = &cobra.Command{
 
 Examples:
   # Create from stdin
-  echo '{"description": "Example description"}' | client firmwareupdatejob create
+  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "serverProxyAddress": "192.168.1.1", "updateURI": "https://example.com"}' | client firmwareupdatejob create
 
   # Create with --spec flag
-  client firmwareupdatejob create --spec '{"description": "Example description"}'
+  client firmwareupdatejob create --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "serverProxyAddress": "192.168.1.1", "updateURI": "https://example.com"}'
 
 Spec fields:
-  description (string)
+  targetAddress (string) [required]
+  username (string) [required]
+  password (string) [required]
+  ociReference (string) [required]
+  targets ([]string) [required]
+  serverProxyAddress (string) [required]
+  updateURI (string)
 `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, err := getClient()
@@ -364,13 +370,19 @@ var firmwareupdatejobUpdateCmd = &cobra.Command{
 
 Examples:
   # Update from stdin
-  echo '{"description": "Example description"}' | client firmwareupdatejob update <uid>
+  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "serverProxyAddress": "192.168.1.1", "updateURI": "https://example.com"}' | client firmwareupdatejob update <uid>
 
   # Update with --spec flag
-  client firmwareupdatejob update <uid> --spec '{"description": "Example description"}'
+  client firmwareupdatejob update <uid> --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "serverProxyAddress": "192.168.1.1", "updateURI": "https://example.com"}'
 
 Spec fields:
-  description (string)
+  targetAddress (string) [required]
+  username (string) [required]
+  password (string) [required]
+  ociReference (string) [required]
+  targets ([]string) [required]
+  serverProxyAddress (string) [required]
+  updateURI (string)
 `,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

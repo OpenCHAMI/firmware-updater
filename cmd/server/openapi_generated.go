@@ -43,7 +43,7 @@ func ServeSwaggerUI(w http.ResponseWriter, r *http.Request) {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>firmware_manager API Documentation</title>
+    <title>firmware_updater API Documentation</title>
     <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css">
     <style>
         html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
@@ -83,7 +83,7 @@ func GenerateOpenAPISpec() *openapi3.T {
 	spec := &openapi3.T{
 		OpenAPI: "3.0.0",
 		Info: &openapi3.Info{
-			Title:       "firmware_manager API",
+			Title:       "firmware_updater API",
 			Description: "Fabrica-generated REST API with Kubernetes-style resource management",
 			Version:     "1.0.0",
 			Contact: &openapi3.Contact{
@@ -120,7 +120,7 @@ func GenerateOpenAPISpec() *openapi3.T {
 		WithRequired([]string{"status"})
 	healthExample := map[string]interface{}{
 		"status":  "ok",
-		"service": "firmware_manager",
+		"service": "firmware_updater",
 		"version": "1.0.0",
 		"time":    "2026-01-01T00:00:00Z",
 	}
@@ -142,7 +142,7 @@ func GenerateOpenAPISpec() *openapi3.T {
 	openAPIJSONExample := map[string]interface{}{
 		"openapi": "3.0.0",
 		"info": map[string]interface{}{
-			"title":   "firmware_manager API",
+			"title":   "firmware_updater API",
 			"version": "1.0.0",
 		},
 	}
