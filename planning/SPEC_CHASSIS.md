@@ -1,59 +1,62 @@
-The Fabrica documentation states that all automatically generated files end with the `_generated.go` suffix. When you run `fabrica generate` after modifying a resource (like updating a `Spec` or `Status` field), the generator overwrites these specific `_generated.go` files to match the new schema.
-
-However, it will not overwrite your custom logic. The documentation designates `cmd/server/openapi_extensions.go` as a "**create-once**, never overwritten" hook designed specifically for custom, non-generated routes. Because the `GET /firmware-search` route will be registered in `openapi_extensions.go` and the business logic placed into a new custom file (`pkg/firmwareproxy/search.go`), your code is safe from regeneration. Furthermore, since this search endpoint does not modify or create a new Fabrica resource, running `fabrica generate` is not required for this specific addition.
-
-Here is the implementation plan utilizing your exact formatting structure.
-
-# Phase 2: Reconciliation Implementation - Dynamic OCI Search Endpoint
+# Phase 2: Reconciliation Implementation - Universal Redfish Dispatcher
 
 ## 1. Context Acquisition
 
-Read the `pkg/firmwareproxy/resolver.go` file to understand how the service initializes `oras.land/oras-go/v2` remote registry clients and handles `PlainHTTP` fallback for loopback addresses. Do not modify the underlying database driver, storage types, or generate any new Fabrica Custom Resources (CRDs). The routing logic must be placed in `cmd/server/openapi_extensions.go`.
+Read the `apis/example.fabrica.dev/v1/firmwareupdatejob_types.go` file to understand the current `Spec` schema. The objective is to expose the Redfish HTTP action path as a configurable parameter to support non-standard BMCs, Chassis Controllers, and Cabinet Controllers. Do not modify the underlying database driver or storage types.
 
 ## 2. Reconciliation State Machine
 
-Implement the following stateless logic inside `pkg/firmwareproxy/search.go`.
+Implement the following logic inside the generated Fabrica reconciler loop located in `pkg/reconcilers/firmwareupdatejob_reconciler.go`.
 
 * **Pre-flight Checks:**
-* Parse the target registry URL provided by the caller in the `registry` query parameter. Determine if `PlainHTTP` must be enabled (e.g., if the target is `localhost`, `127.0.0.1`, or `::1`).
+* Evaluate the user-provided `Spec.UpdateURI`. If the field is empty, default the string to the standard DMTF path: `/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate`.
+* Validate that if an `UpdateURI` is explicitly provided, it begins with `/redfish/v1/`.
 
 
 * **Execution Steps:**
-* Step 1: Initialize a `remote.Registry` client pointing to the target registry.
-* Step 2: Execute `registry.Repositories(ctx)` to retrieve all repositories.
-* Step 3: Iterate over each repository. Initialize a `remote.Repository` client and execute `repo.Tags(ctx)` to retrieve all tags.
-* Step 4: Iterate over each tag. Use `oras.FetchBytes(ctx, ...)` to pull the manifest for `repository:tag`.
-* Step 5: Unmarshal the manifest bytes and verify `artifactType` exactly matches `application/vnd.openchami.firmware.bundle.v1+json`.
-* Step 6: Iterate through the user's provided search parameters. Verify that every provided key exists in the manifest's `annotations` map and that the values match exactly.
-* Step 7: Append successful matches to a result slice containing the OCI Reference (`registry/repo:tag`), the Payload Digest (digest of the first layer), and the full annotations map.
+* Step 1: In the Redfish Dispatch phase, modify the HTTP POST request builder to route the payload to the dynamically resolved `UpdateURI` rather than the hardcoded string.
+* Step 2: Ensure the Redfish JSON payload (`ImageURI`, `Targets`, `TransferProtocol`) remains intact and is sent to the new dynamic path.
 
 
 * **Error Handling:**
-* Item-level 404 errors during the repository/tag iteration loop (e.g., a tag was deleted during the scan) are transient. Log the error and `continue` to the next iteration.
-* Registry connection timeouts or 5xx errors are terminal. Halt execution and return the error.
+* A malformed `UpdateURI` (e.g., failing the `/redfish/v1/` prefix check) is a terminal error. Halt execution before attempting to dial the OCI registry or the hardware.
+* Network timeouts to the new controller IPs remain transient errors governed by the existing exponential backoff strategy.
 
 
 
 ## 3. State Updates
 
-Based on the execution steps, update the HTTP response explicitly in `cmd/server/openapi_extensions.go`.
+Based on the execution steps, update the resource's `Status` field explicitly.
 
-* **On Success:** Set the `Content-Type` header to `application/json`, return an HTTP 200 status code, and write the JSON-marshaled result slice.
-* **On Transient Failure:** (Handled internally by the iteration loop; skipped items do not affect the final 200 OK state).
-* **On Terminal Failure:** Return an HTTP 503 status code and append the error message indicating the OCI backend is unavailable.
+* **On Success:** Transition `Status.JobState` to `InProgress` and inject the external Redfish Task ID if the chassis controller returns one.
+* **On Transient Failure:** Keep `Status.JobState` as `Resolving` or `Pending` depending on the phase, allowing the reconciler to retry the connection to the controller.
+* **On Terminal Failure (Malformed URI):** Set `Status.JobState` to `Failed` and append the exact error message: "invalid UpdateURI: must begin with /redfish/v1/".
 
 ## 4. Acceptance Criteria
 
+* **Code Generation:** The agent must add the `UpdateURI string` field (with `omitempty` JSON tags) to the Spec struct and execute `fabrica generate` to rebuild the models.
 * **Compilation:** The code must compile. Run `go mod tidy` and `go build ./...`.
-* **Testing:** Stage two distinct payloads in a local registry using ORAS:
-`oras push 127.0.0.1:5000/firmware/cray-bmc:1.10.2 --plain-http --artifact-type application/vnd.openchami.firmware.bundle.v1+json --annotation "vendor=HPE" --annotation "component=bmc" dummy_firmware.bin:application/vnd.openchami.firmware.payload.v1`
-`oras push 127.0.0.1:5000/firmware/dell-bios:2.0.0 --plain-http --artifact-type application/vnd.openchami.firmware.bundle.v1+json --annotation "vendor=Dell" --annotation "component=bios" dummy_firmware.bin:application/vnd.openchami.firmware.payload.v1`
-* **Idempotency Verification:** The endpoint must be able to run multiple times against the same query without duplicating the returned results. Execute `curl -sS "http://127.0.0.1:8090/firmware-search?registry=127.0.0.1:5000&vendor=HPE"`. The JSON response must include the `cray-bmc:1.10.2` artifact and explicitly omit the `dell-bios:2.0.0` artifact.
+* **Idempotency Verification:** The reconciler must be idempotent. It should be able to run multiple times against the same `Spec` without duplicating external Redfish calls if the state is already `InProgress`.
+* **Testing:** Stage dummy payloads in the local registry. Execute the following commands to verify the `UpdateURI` parameter successfully routes the `Targets` to the correct hardware paths:
+
+**Test 1: Node BIOS Update**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ -H 'Content-Type: application/json' -d '{"metadata":{"name":"node1-bios-update"},"spec":{"targetAddress":"10.104.0.40","username":"root","password":"initial0","ociReference":"127.0.0.1:5000/firmware/bios:1.8.2","targets":["/redfish/v1/UpdateService/FirmwareInventory/Node1.BIOS"],"serverProxyAddress":"10.254.1.20","updateURI":"/redfish/v1/UpdateService/Actions/SimpleUpdate"}}'
+
+```
+
+**Test 2: Cabinet Controller Update**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ -H 'Content-Type: application/json' -d '{"metadata":{"name":"cabinet-controller-update"},"spec":{"targetAddress":"10.104.0.35","username":"root","password":"initial0","ociReference":"127.0.0.1:5000/firmware/cc:1.9.6","targets":["/redfish/v1/UpdateService/FirmwareInventory/BMC"],"serverProxyAddress":"10.254.1.20","updateURI":"/redfish/v1/UpdateService/Actions/SimpleUpdate"}}'
+
+```
 
 ## 5. Output Artifacts
 
-Generate a `planning/CHASSIS_HANDOFF.md` containing:
+Generate a `CHASSIS_HANDOFF.md` containing:
 
 1. A brief summary of the implemented logic.
-3. The exact, verified `curl` command that successfully executes your code.
-4. Detailed notes on important details for using the code, whereby someone with no context could fully utilize the code you implemented and it’s endpoints as expected and fully understand the implementation.
+3. The exact, verified `curl` command that successfully tested the code.
+4. Detailed notes on important details for using the code, whereby someone with no context could fully utilize the code you wrote and the endpoints as expected and fully understand the implementation.
