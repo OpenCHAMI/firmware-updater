@@ -90,7 +90,54 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
-	taskID, err := dispatchRedfishWithBackoff(ctx, res, proxyURI)
+	// Discover the UpdateService action URI
+	actionURI, err := discoverUpdateServiceActionWithBackoff(ctx, res.Spec.TargetAddress, res.Spec.Username, res.Spec.Password)
+	if err != nil {
+		if isTerminalError(err) {
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
+			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+				return fmt.Errorf("set terminal failure after UpdateService discovery error: %w", updateErr)
+			}
+			return nil
+		}
+
+		res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
+		res.Status.JobState = "Failed"
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("persist exhausted UpdateService discovery transient error as failed: %w", updateErr)
+		}
+		return nil
+	}
+
+	r.Logger.Debugf("FirmwareUpdateJob %s discovered UpdateService action URI: %s", res.GetUID(), actionURI)
+
+	// If Component is specified and Targets is empty, discover targets from FirmwareInventory
+	if res.Spec.Component != "" && len(res.Spec.Targets) == 0 {
+		targets, err := discoverTargetsFromInventoryWithBackoff(ctx, res.Spec.TargetAddress, res.Spec.Username, res.Spec.Password, res.Spec.Component)
+		if err != nil {
+			if isTerminalError(err) {
+				res.Status.JobState = "Failed"
+				res.Status.ErrorDetail = err.Error()
+				if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+					return fmt.Errorf("set terminal failure after FirmwareInventory discovery error: %w", updateErr)
+				}
+				return nil
+			}
+
+			res.Status.ErrorDetail = err.Error()
+			res.Status.JobState = "Failed"
+			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+				return fmt.Errorf("persist exhausted FirmwareInventory discovery transient error as failed: %w", updateErr)
+			}
+			return nil
+		}
+
+		res.Spec.Targets = targets
+		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
+	}
+
+	taskID, err := dispatchRedfishWithBackoff(ctx, res, proxyURI, actionURI)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -140,12 +187,60 @@ func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string
 	return "", lastErr
 }
 
-func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) (string, error) {
+func discoverUpdateServiceActionWithBackoff(ctx context.Context, targetAddress, username, password string) (string, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		taskID, err := dispatchRedfishOnce(ctx, res, proxyURI)
+		actionURI, err := discoverUpdateServiceAction(ctx, targetAddress, username, password)
+		if err == nil {
+			return actionURI, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return "", waitErr
+		}
+		backoff *= 2
+	}
+
+	return "", lastErr
+}
+
+func discoverTargetsFromInventoryWithBackoff(ctx context.Context, targetAddress, username, password, component string) ([]string, error) {
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		targets, err := discoverTargetsFromInventory(ctx, targetAddress, username, password, component)
+		if err == nil {
+			return targets, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return nil, waitErr
+		}
+		backoff *= 2
+	}
+
+	return nil, lastErr
+}
+
+func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI, actionURI string) (string, error) {
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		taskID, err := dispatchRedfishOnce(ctx, res, proxyURI, actionURI)
 		if err == nil {
 			return taskID, nil
 		}
@@ -164,7 +259,7 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 	return "", lastErr
 }
 
-func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) (string, error) {
+func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI, actionURI string) (string, error) {
 	payload := map[string]interface{}{
 		"ImageURI":         proxyURI,
 		"Targets":          res.Spec.Targets,
@@ -175,7 +270,12 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyUR
 		return "", fmt.Errorf("marshal Redfish SimpleUpdate body: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/Actions/SimpleUpdate", strings.TrimSpace(res.Spec.TargetAddress))
+	// Construct the full endpoint URL if actionURI is a relative path
+	endpoint := actionURI
+	if !strings.HasPrefix(endpoint, "http") {
+		endpoint = fmt.Sprintf("https://%s%s", strings.TrimSpace(res.Spec.TargetAddress), actionURI)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", fmt.Errorf("build Redfish SimpleUpdate request: %w", err)
@@ -257,4 +357,169 @@ func isLikelyTransientNetworkError(err error) bool {
 
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "timeout") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "no route to host")
+}
+
+// discoverUpdateServiceAction queries the UpdateService endpoint and returns the SimpleUpdate action URI
+func discoverUpdateServiceAction(ctx context.Context, targetAddress, username, password string) (string, error) {
+	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService", strings.TrimSpace(targetAddress))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build UpdateService GET request: %w", err)
+	}
+	req.SetBasicAuth(username, password)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if isLikelyTransientNetworkError(err) {
+			return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
+		}
+		return "", fmt.Errorf("UpdateService GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
+		return "", &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("UpdateService returned %s", resp.Status)}
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
+		return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("UpdateService returned %s", resp.Status)}
+	}
+
+	var updateService map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&updateService); err != nil {
+		return "", fmt.Errorf("parse UpdateService response: %w", err)
+	}
+
+	// Look for Actions object
+	actions, ok := updateService["Actions"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("auto-discovery failed: no Actions object in UpdateService response")
+	}
+
+	// Try to find SimpleUpdate action with either key format
+	var actionTarget string
+	if simpleUpdate, ok := actions["#UpdateService.SimpleUpdate"].(map[string]interface{}); ok {
+		if target, ok := simpleUpdate["target"].(string); ok {
+			actionTarget = target
+		}
+	} else if simpleUpdate, ok := actions["#SimpleUpdate"].(map[string]interface{}); ok {
+		if target, ok := simpleUpdate["target"].(string); ok {
+			actionTarget = target
+		}
+	}
+
+	if actionTarget == "" {
+		return "", fmt.Errorf("auto-discovery failed: no SimpleUpdate action found in UpdateService")
+	}
+
+	return actionTarget, nil
+}
+
+// discoverTargetsFromInventory queries FirmwareInventory and returns targets matching the component
+func discoverTargetsFromInventory(ctx context.Context, targetAddress, username, password, component string) ([]string, error) {
+	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/FirmwareInventory", strings.TrimSpace(targetAddress))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build FirmwareInventory GET request: %w", err)
+	}
+	req.SetBasicAuth(username, password)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if isLikelyTransientNetworkError(err) {
+			return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
+		}
+		return nil, fmt.Errorf("FirmwareInventory GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
+		return nil, &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
+		return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
+	}
+
+	var inventory map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&inventory); err != nil {
+		return nil, fmt.Errorf("parse FirmwareInventory response: %w", err)
+	}
+
+	members, ok := inventory["Members"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("auto-discovery failed: no Members array in FirmwareInventory response")
+	}
+
+	var targets []string
+	componentLower := strings.ToLower(component)
+
+	for _, member := range members {
+		memberMap, ok := member.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Get the @odata.id for this member
+		memberID, ok := memberMap["@odata.id"].(string)
+		if !ok || memberID == "" {
+			continue
+		}
+
+		// Fetch the member details
+		memberReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), memberID), nil)
+		if err != nil {
+			continue
+		}
+		memberReq.SetBasicAuth(username, password)
+
+		memberResp, err := client.Do(memberReq)
+		if err != nil || memberResp.StatusCode != http.StatusOK {
+			if memberResp != nil {
+				memberResp.Body.Close()
+			}
+			continue
+		}
+
+		var memberDetail map[string]interface{}
+		if err := json.NewDecoder(memberResp.Body).Decode(&memberDetail); err != nil {
+			memberResp.Body.Close()
+			continue
+		}
+		memberResp.Body.Close()
+
+		// Check Id, Name, and Description fields for component match
+		if id, ok := memberDetail["Id"].(string); ok && strings.Contains(strings.ToLower(id), componentLower) {
+			targets = append(targets, memberID)
+			continue
+		}
+		if name, ok := memberDetail["Name"].(string); ok && strings.Contains(strings.ToLower(name), componentLower) {
+			targets = append(targets, memberID)
+			continue
+		}
+		if description, ok := memberDetail["Description"].(string); ok && strings.Contains(strings.ToLower(description), componentLower) {
+			targets = append(targets, memberID)
+			continue
+		}
+	}
+
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("auto-discovery failed: component %q not found in FirmwareInventory", component)
+	}
+
+	return targets, nil
 }

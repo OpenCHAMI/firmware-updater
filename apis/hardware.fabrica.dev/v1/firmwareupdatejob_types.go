@@ -26,7 +26,8 @@ type FirmwareUpdateJobSpec struct {
 	Username           string   `json:"username" validate:"required"`
 	Password           string   `json:"password" validate:"required"`
 	OCIReference       string   `json:"ociReference" validate:"required"`
-	Targets            []string `json:"targets" validate:"required,min=1,dive,required"`
+	Targets            []string `json:"targets,omitempty" validate:"dive,required"`
+	Component          string   `json:"component,omitempty"`
 	ServerProxyAddress string   `json:"serverProxyAddress" validate:"required"`
 }
 
@@ -39,13 +40,17 @@ type FirmwareUpdateJobStatus struct {
 
 // Validate implements custom validation logic for FirmwareUpdateJob
 func (r *FirmwareUpdateJob) Validate(ctx context.Context) error {
-	if len(r.Spec.Targets) == 0 {
-		return fmt.Errorf("spec.targets must contain at least one Redfish target URI")
+	// Either Targets or Component must be provided
+	if len(r.Spec.Targets) == 0 && r.Spec.Component == "" {
+		return fmt.Errorf("spec.targets or spec.component must be provided")
 	}
 
-	for i, target := range r.Spec.Targets {
-		if target == "" {
-			return fmt.Errorf("spec.targets[%d] must not be empty", i)
+	// If Targets is provided, validate it
+	if len(r.Spec.Targets) > 0 {
+		for i, target := range r.Spec.Targets {
+			if target == "" {
+				return fmt.Errorf("spec.targets[%d] must not be empty", i)
+			}
 		}
 	}
 

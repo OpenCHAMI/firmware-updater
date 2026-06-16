@@ -40,13 +40,13 @@ Import modes:
 
 Examples:
   # Import from backup directory
-  firmware_manager import --input ./backup
+  firmware_updater import --input ./backup
 
   # Dry run to preview changes
-  firmware_manager import --input ./backup --dry-run
+  firmware_updater import --input ./backup --dry-run
 
   # Replace all resources
-  firmware_manager import --input ./backup --mode replace
+  firmware_updater import --input ./backup --mode replace
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runImport(cmd.Context(), input, mode, dryRun, skipExisting)

@@ -35,10 +35,10 @@ This is useful for:
 
 Examples:
   # Export all resources to YAML
-  firmware_manager export --format yaml --output ./backup
+  firmware_updater export --format yaml --output ./backup
 
   # Export specific resource types
-  firmware_manager export --kinds FirmwareUpdateJob --output ./firmwareupdatejob-backup
+  firmware_updater export --kinds FirmwareUpdateJob --output ./firmwareupdatejob-backup
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExport(cmd.Context(), format, output, kinds, perType)
