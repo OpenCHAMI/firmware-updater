@@ -314,16 +314,17 @@ var firmwareupdatejobCreateCmd = &cobra.Command{
 
 Examples:
   # Create from stdin
-  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}' | client firmwareupdatejob create
+  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "{}", "discovery": "{}", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}' | client firmwareupdatejob create
 
   # Create with --spec flag
-  client firmwareupdatejob create --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}'
+  client firmwareupdatejob create --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "{}", "discovery": "{}", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}'
 
 Spec fields:
   targetAddress (string) [required]
   username (string) [required]
   password (string) [required]
-  ociReference (string) [required]
+  ociReference (*string)
+  discovery (*v1.DiscoverySpec)
   targets ([]string) [required]
   component (string)
   serverProxyAddress (string) [required]
@@ -370,16 +371,17 @@ var firmwareupdatejobUpdateCmd = &cobra.Command{
 
 Examples:
   # Update from stdin
-  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}' | client firmwareupdatejob update <uid>
+  echo '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "{}", "discovery": "{}", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}' | client firmwareupdatejob update <uid>
 
   # Update with --spec flag
-  client firmwareupdatejob update <uid> --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "example-value", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}'
+  client firmwareupdatejob update <uid> --spec '{"targetAddress": "192.168.1.1", "username": "example-name", "password": "example-value", "ociReference": "{}", "discovery": "{}", "targets": ["["item1","item2"]"], "component": "example-value", "serverProxyAddress": "192.168.1.1"}'
 
 Spec fields:
   targetAddress (string) [required]
   username (string) [required]
   password (string) [required]
-  ociReference (string) [required]
+  ociReference (*string)
+  discovery (*v1.DiscoverySpec)
   targets ([]string) [required]
   component (string)
   serverProxyAddress (string) [required]

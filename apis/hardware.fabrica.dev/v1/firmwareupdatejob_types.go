@@ -7,9 +7,17 @@ package v1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/openchami/fabrica/pkg/fabrica"
 )
+
+// DiscoverySpec defines OCI artifact discovery parameters.
+type DiscoverySpec struct {
+	Repository    string `json:"repository" yaml:"repository" validate:"required"`
+	HardwareModel string `json:"hardwareModel" yaml:"hardwareModel" validate:"required"`
+	Version       string `json:"version" yaml:"version" validate:"required"`
+}
 
 // FirmwareUpdateJob represents a firmwareupdatejob resource
 type FirmwareUpdateJob struct {
@@ -22,24 +30,50 @@ type FirmwareUpdateJob struct {
 
 // FirmwareUpdateJobSpec defines the desired state of FirmwareUpdateJob
 type FirmwareUpdateJobSpec struct {
-	TargetAddress      string   `json:"targetAddress" validate:"required"`
-	Username           string   `json:"username" validate:"required"`
-	Password           string   `json:"password" validate:"required"`
-	OCIReference       string   `json:"ociReference" validate:"required"`
-	Targets            []string `json:"targets,omitempty" validate:"dive,required"`
-	Component          string   `json:"component,omitempty"`
-	ServerProxyAddress string   `json:"serverProxyAddress" validate:"required"`
+	TargetAddress      string         `json:"targetAddress" validate:"required"`
+	Username           string         `json:"username" validate:"required"`
+	Password           string         `json:"password" validate:"required"`
+	OCIReference       *string        `json:"ociReference,omitempty"`
+	Discovery          *DiscoverySpec `json:"discovery,omitempty"`
+	Targets            []string       `json:"targets,omitempty" validate:"dive,required"`
+	Component          string         `json:"component,omitempty"`
+	ServerProxyAddress string         `json:"serverProxyAddress" validate:"required"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
 type FirmwareUpdateJobStatus struct {
-	JobState    string `json:"jobState,omitempty"`
-	TaskID      string `json:"taskID,omitempty"`
-	ErrorDetail string `json:"errorDetail,omitempty"`
+	JobState        string `json:"jobState,omitempty"`
+	TaskID          string `json:"taskID,omitempty"`
+	ErrorDetail     string `json:"errorDetail,omitempty"`
+	ResolvedVersion string `json:"resolvedVersion,omitempty"`
+	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateJob
 func (r *FirmwareUpdateJob) Validate(ctx context.Context) error {
+	hasOCIReference := r.Spec.OCIReference != nil && strings.TrimSpace(*r.Spec.OCIReference) != ""
+	hasDiscovery := r.Spec.Discovery != nil
+
+	if r.Spec.OCIReference != nil && strings.TrimSpace(*r.Spec.OCIReference) == "" {
+		return fmt.Errorf("spec.ociReference must not be empty when provided")
+	}
+
+	if hasDiscovery {
+		if strings.TrimSpace(r.Spec.Discovery.Repository) == "" {
+			return fmt.Errorf("spec.discovery.repository must be provided")
+		}
+		if strings.TrimSpace(r.Spec.Discovery.HardwareModel) == "" {
+			return fmt.Errorf("spec.discovery.hardwareModel must be provided")
+		}
+		if strings.TrimSpace(r.Spec.Discovery.Version) == "" {
+			return fmt.Errorf("spec.discovery.version must be provided")
+		}
+	}
+
+	if hasOCIReference == hasDiscovery {
+		return fmt.Errorf("exactly one of spec.ociReference or spec.discovery must be provided")
+	}
+
 	// Either Targets or Component must be provided
 	if len(r.Spec.Targets) == 0 && r.Spec.Component == "" {
 		return fmt.Errorf("spec.targets or spec.component must be provided")

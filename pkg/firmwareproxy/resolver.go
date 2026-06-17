@@ -6,17 +6,24 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/mod/semver"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
 )
 
 const FirmwareBundleArtifactType = "application/vnd.openchami.firmware.bundle.v1+json"
+
+const (
+	annotationCompatibleHardware = "dev.fabrica.hardware.compatible"
+	annotationImageVersion       = "org.opencontainers.image.version"
+)
 
 type HTTPStatusError struct {
 	StatusCode int
@@ -35,6 +42,19 @@ func (e *HTTPStatusError) Error() string {
 
 type payloadLocation struct {
 	Repository string
+}
+
+type DiscoveryResult struct {
+	Version      string
+	Digest       string
+	OCIReference string
+}
+
+type manifestCandidate struct {
+	tag               string
+	versionRaw        string
+	versionNormalized string
+	payloadDigest     string
 }
 
 var payloadIndex sync.Map
@@ -75,6 +95,153 @@ func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	payloadIndex.Store(payloadDigest, payloadLocation{Repository: parsed.Registry + "/" + parsed.Repository})
 
 	return payloadDigest, nil
+}
+
+func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {
+	repo, err := remote.NewRepository(strings.TrimSpace(repository))
+	if err != nil {
+		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
+	}
+	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
+
+	var tags []string
+	if err := repo.Tags(ctx, "", func(batch []string) error {
+		tags = append(tags, batch...)
+		return nil
+	}); err != nil {
+		return DiscoveryResult{}, classifyORASError(fmt.Errorf("list tags for %q: %w", repository, err))
+	}
+
+	if len(tags) == 0 {
+		return DiscoveryResult{}, &HTTPStatusError{StatusCode: 404, Message: fmt.Sprintf("no tags found in repository %q", repository)}
+	}
+
+	candidates := make([]manifestCandidate, 0, len(tags))
+	for _, tag := range tags {
+		_, manifestBytes, err := oras.FetchBytes(ctx, repo, tag, oras.FetchBytesOptions{})
+		if err != nil {
+			continue
+		}
+
+		var manifest ocispec.Manifest
+		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+			continue
+		}
+
+		candidate, ok := buildManifestCandidate(manifest, tag, hardwareModel)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	selected, err := selectManifestCandidate(candidates, versionTarget)
+	if err != nil {
+		return DiscoveryResult{}, err
+	}
+
+	payloadIndex.Store(selected.payloadDigest, payloadLocation{Repository: repository})
+
+	return DiscoveryResult{
+		Version:      selected.versionRaw,
+		Digest:       selected.payloadDigest,
+		OCIReference: fmt.Sprintf("%s:%s", repository, selected.tag),
+	}, nil
+}
+
+func buildManifestCandidate(manifest ocispec.Manifest, tag, hardwareModel string) (manifestCandidate, bool) {
+	if manifest.ArtifactType != FirmwareBundleArtifactType {
+		return manifestCandidate{}, false
+	}
+
+	if len(manifest.Layers) == 0 {
+		return manifestCandidate{}, false
+	}
+
+	compatible := strings.TrimSpace(manifest.Annotations[annotationCompatibleHardware])
+	if !isCompatibleHardware(compatible, hardwareModel) {
+		return manifestCandidate{}, false
+	}
+
+	versionRaw := strings.TrimSpace(manifest.Annotations[annotationImageVersion])
+	versionNormalized, ok := normalizeSemver(versionRaw)
+	if !ok {
+		return manifestCandidate{}, false
+	}
+
+	return manifestCandidate{
+		tag:               tag,
+		versionRaw:        versionRaw,
+		versionNormalized: versionNormalized,
+		payloadDigest:     manifest.Layers[0].Digest.String(),
+	}, true
+}
+
+func selectManifestCandidate(candidates []manifestCandidate, versionTarget string) (manifestCandidate, error) {
+	if len(candidates) == 0 {
+		return manifestCandidate{}, &HTTPStatusError{StatusCode: 404, Message: "no compatible firmware manifests found"}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		cmp := semver.Compare(candidates[i].versionNormalized, candidates[j].versionNormalized)
+		if cmp == 0 {
+			return candidates[i].tag < candidates[j].tag
+		}
+		return cmp > 0
+	})
+
+	if strings.EqualFold(strings.TrimSpace(versionTarget), "latest") {
+		return candidates[0], nil
+	}
+
+	normalizedTarget, ok := normalizeSemver(versionTarget)
+	if !ok {
+		return manifestCandidate{}, &HTTPStatusError{StatusCode: 400, Message: fmt.Sprintf("invalid discovery version target %q", versionTarget)}
+	}
+
+	for _, candidate := range candidates {
+		if candidate.versionNormalized == normalizedTarget {
+			return candidate, nil
+		}
+	}
+
+	return manifestCandidate{}, &HTTPStatusError{StatusCode: 404, Message: fmt.Sprintf("no compatible manifest found for version %q", versionTarget)}
+}
+
+func normalizeSemver(version string) (string, bool) {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if !semver.IsValid(v) {
+		return "", false
+	}
+	return v, true
+}
+
+func isCompatibleHardware(compatibilityAnnotation, hardwareModel string) bool {
+	requested := strings.ToLower(strings.TrimSpace(hardwareModel))
+	if requested == "" {
+		return false
+	}
+
+	for _, token := range strings.FieldsFunc(compatibilityAnnotation, func(r rune) bool {
+		switch r {
+		case ',', ';', '\n', '\r', '\t':
+			return true
+		default:
+			return false
+		}
+	}) {
+		if strings.EqualFold(strings.TrimSpace(token), requested) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, int64, error) {

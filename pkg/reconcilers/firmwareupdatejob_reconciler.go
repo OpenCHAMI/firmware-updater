@@ -69,7 +69,33 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		return fmt.Errorf("update status to Resolving: %w", err)
 	}
 
-	payloadDigest, err := resolvePayloadWithBackoff(ctx, res.Spec.OCIReference)
+	var (
+		payloadDigest   string
+		resolvedVersion string
+		resolvedRef     string
+		err             error
+	)
+
+	if res.Spec.OCIReference != nil {
+		payloadDigest, err = resolvePayloadWithBackoff(ctx, *res.Spec.OCIReference)
+		resolvedRef = *res.Spec.OCIReference
+	} else if res.Spec.Discovery != nil {
+		resolved, resolveErr := resolvePayloadFromDiscoveryWithBackoff(
+			ctx,
+			res.Spec.Discovery.Repository,
+			res.Spec.Discovery.HardwareModel,
+			res.Spec.Discovery.Version,
+		)
+		err = resolveErr
+		if resolveErr == nil {
+			payloadDigest = resolved.Digest
+			resolvedVersion = resolved.Version
+			resolvedRef = resolved.OCIReference
+		}
+	} else {
+		err = &firmwareproxy.HTTPStatusError{StatusCode: 400, Message: "missing both spec.ociReference and spec.discovery"}
+	}
+
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -87,6 +113,10 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		}
 		return nil
 	}
+
+	res.Status.ResolvedDigest = payloadDigest
+	res.Status.ResolvedVersion = resolvedVersion
+	r.Logger.Debugf("FirmwareUpdateJob %s resolved payload digest %q from %q", res.GetUID(), payloadDigest, resolvedRef)
 
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
@@ -185,6 +215,30 @@ func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string
 	}
 
 	return "", lastErr
+}
+
+func resolvePayloadFromDiscoveryWithBackoff(ctx context.Context, repository, hardwareModel, versionTarget string) (firmwareproxy.DiscoveryResult, error) {
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		resolved, err := firmwareproxy.ResolvePayloadFromDiscovery(ctx, repository, hardwareModel, versionTarget)
+		if err == nil {
+			return resolved, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return firmwareproxy.DiscoveryResult{}, waitErr
+		}
+		backoff *= 2
+	}
+
+	return firmwareproxy.DiscoveryResult{}, lastErr
 }
 
 func discoverUpdateServiceActionWithBackoff(ctx context.Context, targetAddress, username, password string) (string, error) {
