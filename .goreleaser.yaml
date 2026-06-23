@@ -1,0 +1,59 @@
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: firmware-updater
+    main: ./cmd/server
+    binary: firmware-updater
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    flags:
+      - -trimpath
+
+dockers:
+  - id: firmware-updater-amd64
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-amd64"
+      - "ghcr.io/openchami/firmware-updater:latest-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+
+  - id: firmware-updater-arm64
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-arm64"
+      - "ghcr.io/openchami/firmware-updater:latest-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+
+docker_manifests:
+  - name_template: "ghcr.io/openchami/firmware-updater:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-amd64"
+      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/openchami/firmware-updater:latest"
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:latest-amd64"
+      - "ghcr.io/openchami/firmware-updater:latest-arm64"
+
+release:
+  github:
+    owner: openchami
+    name: firmware-updater
