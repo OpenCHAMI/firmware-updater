@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 const FirmwareBundleArtifactType = "application/vnd.openchami.firmware.bundle.v1+json"
@@ -59,17 +62,30 @@ type manifestCandidate struct {
 
 var payloadIndex sync.Map
 
-func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
+type Resolver struct {
+	domain   string
+	username string
+	password string
+}
+
+func NewResolver(domain, username, password string) *Resolver {
+	return &Resolver{
+		domain:   normalizeRegistryDomain(domain),
+		username: username,
+		password: password,
+	}
+}
+
+func (r *Resolver) ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	parsed, err := registry.ParseReference(ociReference)
 	if err != nil {
 		return "", fmt.Errorf("parse OCI reference: %w", err)
 	}
 
-	repo, err := remote.NewRepository(parsed.Registry + "/" + parsed.Repository)
+	repo, err := r.newRepository(parsed.Registry + "/" + parsed.Repository)
 	if err != nil {
 		return "", fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(parsed.Registry)
 
 	reference := parsed.ReferenceOrDefault()
 	_, manifestBytes, err := oras.FetchBytes(ctx, repo, reference, oras.FetchBytesOptions{})
@@ -97,12 +113,11 @@ func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	return payloadDigest, nil
 }
 
-func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {
-	repo, err := remote.NewRepository(strings.TrimSpace(repository))
+func (r *Resolver) ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {
+	repo, err := r.newRepository(strings.TrimSpace(repository))
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
 
 	var tags []string
 	if err := repo.Tags(ctx, "", func(batch []string) error {
@@ -244,7 +259,7 @@ func isCompatibleHardware(compatibilityAnnotation, hardwareModel string) bool {
 	return false
 }
 
-func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, int64, error) {
+func (r *Resolver) StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, int64, error) {
 	if _, parseErr := digest.Parse(digestStr); parseErr != nil {
 		return nil, 0, &HTTPStatusError{StatusCode: 400, Message: fmt.Sprintf("invalid digest %q", digestStr)}
 	}
@@ -258,11 +273,10 @@ func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, i
 		return nil, 0, fmt.Errorf("invalid payload index entry for digest %q", digestStr)
 	}
 
-	repo, err := remote.NewRepository(loc.Repository)
+	repo, err := r.newRepository(loc.Repository)
 	if err != nil {
 		return nil, 0, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
 
 	desc, err := repo.Blobs().Resolve(ctx, digestStr)
 	if err != nil {
@@ -275,6 +289,61 @@ func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, i
 	}
 
 	return rc, desc.Size, nil
+}
+
+func (r *Resolver) newRepository(reference string) (*remote.Repository, error) {
+	repo, err := remote.NewRepository(strings.TrimSpace(reference))
+	if err != nil {
+		return nil, err
+	}
+
+	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
+	repo.Client = &auth.Client{
+		Client:     http.DefaultClient,
+		Credential: r.credentialForHost,
+	}
+
+	return repo, nil
+}
+
+func (r *Resolver) credentialForHost(ctx context.Context, hostport string) (auth.Credential, error) {
+	targetRegistry := registryFromCredentialRequest(ctx, hostport)
+	if targetRegistry == "" {
+		return auth.EmptyCredential, nil
+	}
+
+	if r.domain == "" || r.username == "" || r.password == "" {
+		return auth.EmptyCredential, nil
+	}
+
+	if targetRegistry != r.domain {
+		return auth.EmptyCredential, nil
+	}
+
+	return auth.Credential{Username: r.username, Password: r.password}, nil
+}
+
+func registryFromCredentialRequest(_ context.Context, hostport string) string {
+	return normalizeRegistryDomain(hostport)
+}
+
+func normalizeRegistryDomain(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+
+	if strings.Contains(value, "://") {
+		if parsed, err := url.Parse(value); err == nil {
+			value = parsed.Host
+		}
+	}
+
+	if slash := strings.IndexByte(value, '/'); slash >= 0 {
+		value = value[:slash]
+	}
+
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func isLoopbackRegistry(registryHost string) bool {
