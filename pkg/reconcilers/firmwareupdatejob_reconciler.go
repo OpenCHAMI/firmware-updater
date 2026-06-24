@@ -15,11 +15,35 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 )
+
+var (
+	firmwareResolverMu sync.RWMutex
+	firmwareResolver   = firmwareproxy.NewResolver("", "", "")
+)
+
+func SetFirmwareProxyResolver(resolver *firmwareproxy.Resolver) {
+	firmwareResolverMu.Lock()
+	defer firmwareResolverMu.Unlock()
+
+	if resolver == nil {
+		firmwareResolver = firmwareproxy.NewResolver("", "", "")
+		return
+	}
+
+	firmwareResolver = resolver
+}
+
+func getFirmwareProxyResolver() *firmwareproxy.Resolver {
+	firmwareResolverMu.RLock()
+	defer firmwareResolverMu.RUnlock()
+	return firmwareResolver
+}
 
 // reconcileFirmwareUpdateJob contains custom reconciliation logic.
 //
@@ -196,9 +220,10 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string, error) {
 	var lastErr error
 	backoff := time.Second
+	resolver := getFirmwareProxyResolver()
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		payloadDigest, err := firmwareproxy.ResolvePayload(ctx, ociReference)
+		payloadDigest, err := resolver.ResolvePayload(ctx, ociReference)
 		if err == nil {
 			return payloadDigest, nil
 		}
@@ -220,9 +245,10 @@ func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string
 func resolvePayloadFromDiscoveryWithBackoff(ctx context.Context, repository, hardwareModel, versionTarget string) (firmwareproxy.DiscoveryResult, error) {
 	var lastErr error
 	backoff := time.Second
+	resolver := getFirmwareProxyResolver()
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		resolved, err := firmwareproxy.ResolvePayloadFromDiscovery(ctx, repository, hardwareModel, versionTarget)
+		resolved, err := resolver.ResolvePayloadFromDiscovery(ctx, repository, hardwareModel, versionTarget)
 		if err == nil {
 			return resolved, nil
 		}

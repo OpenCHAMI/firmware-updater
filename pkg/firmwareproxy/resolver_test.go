@@ -1,6 +1,38 @@
 package firmwareproxy
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+func TestResolverCredentialForHostMatch(t *testing.T) {
+	resolver := NewResolver("quay.io", "robot$user", "$super-secret")
+
+	cred, err := resolver.credentialForHost(context.TODO(), "quay.io")
+	if err != nil {
+		t.Fatalf("credentialForHost returned error: %v", err)
+	}
+
+	if cred.Username != "robot$user" {
+		t.Fatalf("expected username to be preserved, got %q", cred.Username)
+	}
+	if cred.Password != "$super-secret" {
+		t.Fatalf("expected password to be preserved, got %q", cred.Password)
+	}
+}
+
+func TestResolverCredentialForHostNoMatch(t *testing.T) {
+	resolver := NewResolver("quay.io", "robot$user", "$super-secret")
+
+	cred, err := resolver.credentialForHost(context.TODO(), "registry-1.docker.io")
+	if err != nil {
+		t.Fatalf("credentialForHost returned error: %v", err)
+	}
+
+	if cred.Username != "" || cred.Password != "" {
+		t.Fatalf("expected empty credential for non-matching host, got username=%q", cred.Username)
+	}
+}
 
 func TestSelectManifestCandidateLatest(t *testing.T) {
 	candidates := []manifestCandidate{

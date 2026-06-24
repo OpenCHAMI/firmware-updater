@@ -66,10 +66,14 @@ func registerCustomOpenAPIPaths(spec *openapi3.T) {
 	spec.Paths.Set("/firmware-proxy/layer/{digest}", &openapi3.PathItem{Get: op})
 }
 
-func registerFirmwareProxyRoute(r chi.Router) {
+func registerFirmwareProxyRoute(r chi.Router, resolver *firmwareproxy.Resolver) {
+	if resolver == nil {
+		resolver = firmwareproxy.NewResolver("", "", "")
+	}
+
 	handler := func(w http.ResponseWriter, req *http.Request) {
 		digest := chi.URLParam(req, "digest")
-		rc, size, err := firmwareproxy.StreamPayloadLayer(req.Context(), digest)
+		rc, size, err := resolver.StreamPayloadLayer(req.Context(), digest)
 		if err != nil {
 			if statusErr, ok := err.(*firmwareproxy.HTTPStatusError); ok {
 				http.Error(w, statusErr.Error(), statusErr.StatusCode)
