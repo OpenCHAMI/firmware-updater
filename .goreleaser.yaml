@@ -5,43 +5,78 @@ before:
     - go mod download
 
 builds:
-  - id: firmware-updater
-    main: ./cmd/server
-    binary: firmware-updater
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-    goarch:
-      - amd64
+- id: firmware-updater-server-linux-amd64
+  main: ./cmd/server
+  binary: firmware-updater-server
+  env:
+    - CGO_ENABLED=1
+    - CC=gcc
+  goos:
+    - linux
+  goarch:
+    - amd64
+  ldflags:
+    - -s -w
+    - -X main.version={{.Version}}
+    - -X main.commit={{.Commit}}
+    - -X main.date={{.Date}}
+  flags:
+    - -trimpath
+
+- id: firmware-updater-server-linux-arm64
+  main: ./cmd/server
+  binary: firmware-updater-server
+  env:
+    - CGO_ENABLED=1
+    - CC=aarch64-linux-gnu-gcc
+  goos:
+    - linux
+  goarch:
       - arm64
-    ldflags:
-      - -s -w
-    flags:
-      - -trimpath
+  ldflags:
+    - -s -w
+    - -X main.version={{.Version}}
+    - -X main.commit={{.Commit}}
+    - -X main.date={{.Date}}
+ flags:
+    - -trimpath
 
 dockers:
-  - id: firmware-updater-amd64
-    goos: linux
-    goarch: amd64
-    image_templates:
-      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-amd64"
-      - "ghcr.io/openchami/firmware-updater:latest-amd64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
+- id: firmware-updater-amd64
+  ids: [firmware-updater-server-linux-amd64]
+  goos: linux
+  goarch: amd64
+  image_templates:
+    - "ghcr.io/openchami/firmware-updater:{{ .Tag }}-amd64"
+    - "ghcr.io/openchami/firmware-updater:latest-amd64"
+  dockerfile: Dockerfile
+  use: buildx
+  build_flag_templates:
+    - "--platform=linux/amd64"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source={{.GitURL}}"
+    - "--label=org.opencontainers.image.licenses=MIT"
 
-  - id: firmware-updater-arm64
-    goos: linux
-    goarch: arm64
-    image_templates:
-      - "ghcr.io/openchami/firmware-updater:{{ .Version }}-arm64"
-      - "ghcr.io/openchami/firmware-updater:latest-arm64"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64"
+- id: firmware-updater-arm64
+  ids: [firmware-updater-server-linux-arm64]
+  goos: linux
+  goarch: arm64
+  image_templates:
+    - "ghcr.io/openchami/firmware-updater:{{ .Tag }}-arm64"
+    - "ghcr.io/openchami/firmware-updater:latest-arm64"
+  dockerfile: Dockerfile
+  use: buildx
+  build_flag_templates:
+    - "--platform=linux/arm64"
+    - "--label=org.opencontainers.image.created={{.Date}}"
+    - "--label=org.opencontainers.image.title={{.ProjectName}}"
+    - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+    - "--label=org.opencontainers.image.version={{.Version}}"
+    - "--label=org.opencontainers.image.source={{.GitURL}}"
+    - "--label=org.opencontainers.image.licenses=MIT"
 
 docker_manifests:
   - name_template: "ghcr.io/openchami/firmware-updater:{{ .Version }}"
@@ -57,3 +92,14 @@ release:
   github:
     owner: openchami
     name: firmware-updater
+
+docker_manifests:
+  - name_template: "ghcr.io/openchami/firmware-updater:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:{{ .Tag }}-amd64"
+      - "ghcr.io/openchami/firmware-updater:{{ .Tag }}-arm64"
+
+  - name_template: "ghcr.io/openchami/firmware-updater:latest"
+    image_templates:
+      - "ghcr.io/openchami/firmware-updater:latest-amd64"
+      - "ghcr.io/openchami/firmware-updater:latest-arm64"
