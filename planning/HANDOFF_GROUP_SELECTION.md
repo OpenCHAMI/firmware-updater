@@ -5,7 +5,7 @@
 This phase delivers group-based firmware update orchestration by extending FirmwareUpdateJob.
 The goal is to support cabinet-style rollouts through SMD-backed user-defined groups without requiring users to submit per-node targets.
 
-Current behavior is primarily single-target oriented. This plan adds fan-out target resolution, lock checks, and bounded parallel dispatch while preserving existing reconciliation patterns.
+Current behavior is primarily single-target oriented. This plan adds fan-out target resolution and bounded parallel dispatch while preserving existing reconciliation patterns. Lock/reservation gating is handled in a follow-on plan (`LOCKING_SUPPORT.md`).
 
 ## 2) Planning Decisions Already Agreed
 
@@ -14,7 +14,7 @@ Current behavior is primarily single-target oriented. This plan adds fan-out tar
 3. Group source is SMD group APIs.
 4. Job model extends existing FirmwareUpdateJob.
 5. Credential input moves toward secret references in spec.
-6. Lock checks integrate with SMD and accept node-level or group-level lock state.
+6. Lock/reservation gating is out of scope for this phase and is deferred to `LOCKING_SUPPORT.md`.
 7. Success criteria for a job is all targeted nodes succeed.
 8. Testing target for this phase is minimal unit tests only.
 
@@ -70,10 +70,9 @@ Use existing lifecycle states and add deterministic handling for fan-out executi
 1. Resolve firmware payload from OCI as currently implemented.
 2. Resolve node set from SMD groupRef.
 3. Resolve credentials from credentialsRef.
-4. Evaluate lock eligibility from SMD (node or group lock accepted).
-5. Build execution plan with bounded parallelism.
-6. Dispatch per-node Redfish update.
-7. Aggregate per-node outcomes and finalize status.
+4. Build execution plan with bounded parallelism.
+5. Dispatch per-node Redfish update.
+6. Aggregate per-node outcomes and finalize status.
 
 ### 4.3 Failure policy
 
@@ -81,7 +80,6 @@ Use existing lifecycle states and add deterministic handling for fan-out executi
 - groupRef not found
 - no resolved members
 - credential reference invalid or unreadable
-- lock disallows execution
 
 2. Transient errors
 - SMD query timeout/5xx
@@ -100,9 +98,10 @@ Use existing lifecycle states and add deterministic handling for fan-out executi
 
 ## 6) Lock Integration Requirements
 
-1. Accept node-level lock or group-level lock checks.
-2. Treat lock conflicts as terminal for current reconcile pass unless policy dictates retry.
-3. Include lock conflict detail in status for clear operator action.
+Lock/reservation gating is deferred to a follow-on plan: see `LOCKING_SUPPORT.md`
+(and its handoff `HANDOFF_LOCKING_SUPPORT.md`). This phase resolves and dispatches
+to the target set without consulting SMD lock state. The lock follow-on layers a
+pre-dispatch safety gate on top of the resolution delivered here.
 
 ## 7) Credentials Strategy (TBD Backend)
 
@@ -125,14 +124,12 @@ This phase requires credential references in API, but backend implementation is 
 1. API and generated artifacts compile after schema updates.
 2. Validation enforces selector exclusivity and group mode requirements.
 3. Group-based target resolution from SMD works for a valid groupRef.
-4. Lock checks block execution when lock policy disallows update.
-5. Fan-out execution respects maxParallel bound.
-6. Job fails when any target fails; succeeds only when all targets succeed.
-7. Existing explicit-target jobs continue to function unchanged.
-8. Minimal unit tests added for:
+4. Fan-out execution respects maxParallel bound.
+5. Job fails when any target fails; succeeds only when all targets succeed.
+6. Existing explicit-target jobs continue to function unchanged.
+7. Minimal unit tests added for:
 - validation rules
 - group resolution behavior
-- lock decision logic
 - fan-out result aggregation
 
 ## 9) Implementation Work Breakdown
@@ -143,7 +140,7 @@ This phase requires credential references in API, but backend implementation is 
 
 2. Reconciler and service logic
 - pkg/reconcilers/firmwareupdatejob_reconciler.go
-- helper modules for SMD lookup, lock checks, credential resolution
+- helper modules for SMD lookup, credential resolution
 
 3. Server wiring/config
 - cmd/server/main.go for any new integration config

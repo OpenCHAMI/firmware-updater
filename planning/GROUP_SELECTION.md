@@ -131,16 +131,11 @@ Extend `FirmwareUpdateJobStatus` to track group-based execution progress.
 
 ## 5. Lock Integration (SMD)
 
-Before dispatching to the resolved member set, query SMD lock status and gate execution.
-
-1. `POST /hsm/v2/locks/status` with body `{ "ComponentIDs": ["<member_xname>", ...] }` (the member xnames from group resolution, not the BMC FQDNs).
-2. Read the `Components[]` array. Treat a member as not-safe-to-update when `Locked == true` OR `Reserved == true`.
-   - `Locked` is the administrative lock flag.
-   - `Reserved` indicates an ownership reservation held via the separate reservations API.
-3. If any in-scope member is locked or reserved, set the job to `Failed` with lock conflict detail (include the member xname and the `CreationTime`/`ExpirationTime` from its lock entry).
-4. The `POST` variant also returns `NotFound[]` for unknown xnames; surface these in status for triage.
-
-Note: this design only reads lock/reservation state. Actively acquiring a reservation for the duration of the update (via `/hsm/v2/locks/service/reservations`) is a separate follow-on, out of scope here.
+Lock and reservation gating is deferred to a follow-on plan: see
+`LOCKING_SUPPORT.md`. This plan resolves and dispatches to the member set without
+consulting SMD lock state. The lock follow-on adds a pre-dispatch safety gate on
+top of the target resolution defined here, applicable to both single-`TargetAddress`
+and group jobs.
 
 ## 6. Acceptance Criteria
 
@@ -174,7 +169,6 @@ Note: this design only reads lock/reservation state. Actively acquiring a reserv
    - Validation selector rules (`TargetAddress` XOR `GroupRef`; component selection required).
    - SMD group resolution happy path and error cases.
    - Parallelism wave/bounding logic.
-   - Lock conflict detection.
    - Backward compatibility with single-`TargetAddress` jobs.
 
 ### 6.1 Example Group-Mode Request
@@ -228,23 +222,14 @@ Validated against the OpenCHAMI/smd source (`master`). Base path: `apiRootV2 = "
 - **Corroborating endpoint:** `GET /hsm/v2/Inventory/RedfishEndpoints/{bmc_xname}` → `rf.RedfishEPDescription` with `ID`, `Type`, `Hostname`, `Domain`, `FQDN`, `IPAddress` (struct `IPAddr`). Keyed by BMC xname; useful when an IP (not FQDN) is required.
 - **Authority:** SMD inventory FQDN/IP is authoritative. xname parent derivation (`x3000c0s1b0n0` -> `x3000c0s1b0`) is a fallback only.
 
-### 7.3 Lock Query
+Lock-status SMD contract details are documented in `LOCKING_SUPPORT.md`.
 
-- **Endpoint:** `POST /hsm/v2/locks/status` (body filter; preferred) or `GET /hsm/v2/locks/status` (query filter).
-- **Handler:** `doCompLocksStatus` / `doCompLocksStatusGet` (`cmd/smd/smd-api.go`); routes under `compLockBaseV2 = "/hsm/v2/locks"`.
-- **Request body:** `sm.CompLockV2Filter` (`pkg/sm/complocks.go`): `{ "ComponentIDs": ["x..."] }` (plus optional Type/State/Group/Partition filters).
-- **Response type:** `sm.CompLockV2Status` (`pkg/sm/complocks.go`):
-  - `Components[]` with `ID`, `Locked`, `Reserved`, `ReservationDisabled`, `CreationTime`, `ExpirationTime`.
-  - `NotFound[]` (POST variant only).
-- **Locks vs reservations:** distinct. `Locked` = administrative lock; `Reserved` = ownership reservation via the separate `/hsm/v2/locks/reservations*` and `/hsm/v2/locks/service/reservations*` APIs (which carry DeputyKey/ReservationKey). For a pre-update safety gate, treat `Locked || Reserved` as "do not update".
-
-### 7.4 Caveats and Open Items
+### 7.3 Caveats and Open Items
 
 1. **Auth:** SMD handlers in `cmd/smd/smd-api.go` do not themselves enforce authorization; OpenCHAMI deployments typically front SMD with a JWT/gateway. The firmware-updater -> SMD authentication model (token passthrough vs. service token) must be decided. Tracked in Section 8.
 2. **Member type heterogeneity:** groups may contain non-Node xnames. Define policy: resolve only Nodes, or accept controller xnames directly when `Type` indicates a BMC/controller.
 3. **No pagination:** these GET collections return full arrays; filter via query params only. Acceptable for expected group sizes but note for very large groups.
 4. **Stale inventory:** a member present in a group but not yet discovered will lack a ComponentEndpoint; handle as "unresolved," not an error (ties to `AllowPartialTargets`).
-5. **Reservations not acquired:** this design only reads lock/reservation state; holding a reservation for the update duration is a separate follow-on.
 
 ## 8. Open Decision Items
 
@@ -282,7 +267,6 @@ Upon successful implementation, generate a handoff document (`HANDOFF_GROUP_SELE
 3. **Operational Notes for Debuggers**
    - How to query job status and identify group resolution issues.
    - How to inspect per-member results in fan-out jobs.
-   - How to troubleshoot lock conflicts.
 
 4. **SMD Integration Details**
    - Exact SMD endpoints called and contract assumptions verified.
