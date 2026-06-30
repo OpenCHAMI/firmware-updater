@@ -1,6 +1,10 @@
 package firmwareproxy
 
-import "testing"
+import (
+	"testing"
+
+	"oras.land/oras-go/v2/registry/remote"
+)
 
 func TestSelectManifestCandidateLatest(t *testing.T) {
 	candidates := []manifestCandidate{
@@ -57,5 +61,34 @@ func TestIsCompatibleHardware(t *testing.T) {
 	}
 	if isCompatibleHardware(annotation, "x9999") {
 		t.Fatalf("did not expect x9999 to be compatible")
+	}
+}
+
+func TestApplyRepoAuthConfigured(t *testing.T) {
+	InitAuth("test-user", "test-pass")
+	t.Cleanup(func() { InitAuth("", "") })
+
+	repo, err := remote.NewRepository("example.com/fw/repo")
+	if err != nil {
+		t.Fatalf("remote.NewRepository returned error: %v", err)
+	}
+
+	applyRepoAuth(repo)
+	if repo.Client == nil {
+		t.Fatalf("expected repo client to be configured with auth")
+	}
+}
+
+func TestApplyRepoAuthMissingCredentials(t *testing.T) {
+	InitAuth("", "")
+
+	repo, err := remote.NewRepository("example.com/fw/repo")
+	if err != nil {
+		t.Fatalf("remote.NewRepository returned error: %v", err)
+	}
+
+	applyRepoAuth(repo)
+	if repo.Client != nil {
+		t.Fatalf("expected repo client to remain nil when credentials are missing")
 	}
 }

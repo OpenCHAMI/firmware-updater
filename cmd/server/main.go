@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	. "github.com/user/firmware-updater/internal/middleware"
 
 	"github.com/openchami/fabrica/pkg/reconcile"
+	"github.com/user/firmware-updater/pkg/firmwareproxy"
 	"github.com/user/firmware-updater/pkg/reconcilers"
 )
 
@@ -59,6 +61,10 @@ type Config struct {
 	// Feature Flags
 
 	Debug bool `mapstructure:"debug"`
+
+	// Registry authentication (optional)
+	QuayUsername string `mapstructure:"quay_username"`
+	QuayPassword string `mapstructure:"quay_password"`
 }
 
 // DefaultConfig returns the default configuration
@@ -76,6 +82,9 @@ func DefaultConfig() *Config {
 		ReconcileWorkers: 5,
 
 		Debug: false,
+
+		QuayUsername: "",
+		QuayPassword: "",
 	}
 }
 
@@ -153,8 +162,11 @@ func initConfig() {
 	}
 
 	// Environment variables
-	viper.SetEnvPrefix("FIRMWARE-UPDATER")
+	viper.SetEnvPrefix("FIRMWARE_UPDATER")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
+	viper.BindEnv("quay_username")
+	viper.BindEnv("quay_password")
 
 	// Read config file if it exists
 	if err := viper.ReadInConfig(); err == nil {
@@ -175,6 +187,7 @@ func initConfig() {
 
 func runServer(cmd *cobra.Command, args []string) error {
 	log.Printf("Starting firmware-updater server...")
+	firmwareproxy.InitAuth(config.QuayUsername, config.QuayPassword)
 
 	// Initialize storage backend
 

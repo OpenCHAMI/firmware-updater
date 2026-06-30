@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 const FirmwareBundleArtifactType = "application/vnd.openchami.firmware.bundle.v1+json"
@@ -57,7 +59,24 @@ type manifestCandidate struct {
 	payloadDigest     string
 }
 
+type authConfig struct {
+	username string
+	password string
+}
+
 var payloadIndex sync.Map
+var authState sync.RWMutex
+var globalAuthConfig authConfig
+
+// InitAuth configures global OCI registry credentials used by ORAS remote repositories.
+func InitAuth(username, password string) {
+	authState.Lock()
+	globalAuthConfig = authConfig{
+		username: strings.TrimSpace(username),
+		password: strings.TrimSpace(password),
+	}
+	authState.Unlock()
+}
 
 func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	parsed, err := registry.ParseReference(ociReference)
@@ -70,6 +89,7 @@ func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 		return "", fmt.Errorf("create ORAS repository client: %w", err)
 	}
 	repo.PlainHTTP = isLoopbackRegistry(parsed.Registry)
+	applyRepoAuth(repo)
 
 	reference := parsed.ReferenceOrDefault()
 	_, manifestBytes, err := oras.FetchBytes(ctx, repo, reference, oras.FetchBytesOptions{})
@@ -103,6 +123,7 @@ func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel,
 		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
 	}
 	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
+	applyRepoAuth(repo)
 
 	var tags []string
 	if err := repo.Tags(ctx, "", func(batch []string) error {
@@ -263,6 +284,7 @@ func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, i
 		return nil, 0, fmt.Errorf("create ORAS repository client: %w", err)
 	}
 	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
+	applyRepoAuth(repo)
 
 	desc, err := repo.Blobs().Resolve(ctx, digestStr)
 	if err != nil {
@@ -317,4 +339,28 @@ func classifyORASError(err error) error {
 	}
 
 	return err
+}
+
+func applyRepoAuth(repo *remote.Repository) {
+	if repo == nil {
+		return
+	}
+
+	authState.RLock()
+	username := globalAuthConfig.username
+	password := globalAuthConfig.password
+	authState.RUnlock()
+
+	if username == "" || password == "" {
+		return
+	}
+
+	repo.Client = &auth.Client{
+		Client: http.DefaultClient,
+		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
+			Username: username,
+			Password: password,
+		}),
+		Cache: auth.NewCache(),
+	}
 }
