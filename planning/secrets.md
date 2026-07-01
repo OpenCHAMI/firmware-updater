@@ -38,7 +38,8 @@ To implement this specification, the following discrete changes must be made to 
 * Parse the JSON string back into discrete `username` and `password` variables.
 * Inject these variables into the `curl` subprocess arguments (e.g., `-u`, `username:password`).
 
-
+**README updates**
+* Ensure the README is up to date with the new changes.
 
 ### (3) Acceptance Criteria
 
@@ -51,10 +52,7 @@ To implement this specification, the following discrete changes must be made to 
 * **AC7:** The application parses the decrypted JSON payload and dynamically populates the `curl` command.
 * **AC8:** The implemented `curl` execution is manually tested and verified to succeed against the target endpoint using the dynamically retrieved credentials.
 
-### (4) Handoff Document Generation
-
-```markdown
-## Output Artifacts
+### (4) Output Artifacts
 
 Upon meeting all Acceptance Criteria, generate a `HANDOFF-secrets.md` file in the planning directory containing:
 
@@ -65,5 +63,3 @@ Upon meeting all Acceptance Criteria, generate a `HANDOFF-secrets.md` file in th
     * Instructions on generating a valid 64-character hex-encoded `MASTER_KEY` and setting it in the environment.
     * Documentation on how to execute the out-of-band CLI tool to generate the `secrets.json` file.
     * Instructions on how to properly mount or provision the resulting `secrets.json` file into the service's runtime environment.
-
-```
