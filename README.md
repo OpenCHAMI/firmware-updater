@@ -54,6 +54,25 @@ Digest: sha256:5a4a38b79a925da16f1f69707140a66ec462c40a3ed474b30ecd50f1f0cb4f05
 
 To initiate an update, the user submits a `FirmwareUpdateJob` resource. In Discovery Mode, the user specifies the hardware model (`x9000`), the repository path, and the target version (`latest`). The user does not need to know the SHA digest.
 
+Before submitting the job, write encrypted BMC credentials to the local secrets store using the out-of-band CLI:
+
+```bash
+export MASTER_KEY="$(openssl rand -hex 32)"
+go run ./cmd/secret-cli \
+  --secret-id x9000-bmc \
+  --username root \
+  --password initial0 \
+  --store-path ./secrets.json
+
+```
+
+Start the server with the same `MASTER_KEY` and mounted/provisioned store path:
+
+```bash
+MASTER_KEY="$MASTER_KEY" ./tmp/server serve --secrets-file ./secrets.json
+
+```
+
 ### Submit Job Command
 
 ```bash
@@ -65,8 +84,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ \
     },
     "spec": {
       "targetAddress": "x9000c3s7b1",
-      "username": "root",
-      "password": "initial0",
+      "secretID": "x9000-bmc",
       "serverProxyAddress": "10.254.1.20",
       "component": "BMC",
       "discovery": {
@@ -93,8 +111,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ \
   },
   "spec": {
     "targetAddress": "x9000c3s7b1",
-    "username": "root",
-    "password": "initial0",
+    "secretID": "x9000-bmc",
     "discovery": {
       "repository": "127.0.0.1:5000/firmware/cray-bmc",
       "hardwareModel": "x9000",
@@ -133,8 +150,7 @@ curl -k http://127.0.0.1:8090/firmwareupdatejobs/firmwareupdatejob-8eab5b0e
   },
   "spec": {
     "targetAddress": "x9000c3s7b1",
-    "username": "root",
-    "password": "initial0",
+    "secretID": "x9000-bmc",
     "discovery": {
       "repository": "127.0.0.1:5000/firmware/cray-bmc",
       "hardwareModel": "x9000",
