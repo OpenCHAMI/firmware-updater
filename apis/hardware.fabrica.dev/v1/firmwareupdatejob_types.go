@@ -36,16 +36,18 @@ type FirmwareUpdateJobSpec struct {
 	Discovery          *DiscoverySpec `json:"discovery,omitempty"`
 	Targets            []string       `json:"targets,omitempty" validate:"dive,required"`
 	Component          string         `json:"component,omitempty"`
+	IgnoreLocks        bool           `json:"ignoreLocks,omitempty"`
 	ServerProxyAddress string         `json:"serverProxyAddress" validate:"required"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
 type FirmwareUpdateJobStatus struct {
-	JobState        string `json:"jobState,omitempty"`
-	TaskID          string `json:"taskID,omitempty"`
-	ErrorDetail     string `json:"errorDetail,omitempty"`
-	ResolvedVersion string `json:"resolvedVersion,omitempty"`
-	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
+	JobState        string   `json:"jobState,omitempty"`
+	TaskID          string   `json:"taskID,omitempty"`
+	ErrorDetail     string   `json:"errorDetail,omitempty"`
+	ResolvedVersion string   `json:"resolvedVersion,omitempty"`
+	ResolvedDigest  string   `json:"resolvedDigest,omitempty"`
+	LockConflicts   []string `json:"lockConflicts,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateJob

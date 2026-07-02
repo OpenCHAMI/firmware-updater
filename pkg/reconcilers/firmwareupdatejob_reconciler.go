@@ -71,6 +71,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	res.Status.JobState = "Resolving"
 	res.Status.ErrorDetail = ""
+	res.Status.LockConflicts = nil
 	if err := r.UpdateStatus(ctx, res); err != nil {
 		return fmt.Errorf("update status to Resolving: %w", err)
 	}
@@ -190,6 +191,40 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 		res.Spec.Targets = targets
 		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
+	}
+
+	lockTargets := []string{strings.TrimSpace(res.Spec.TargetAddress)}
+	lockConflicts, lockErr := evaluateTargetLocksWithBackoff(ctx, lockTargets)
+	if lockErr != nil {
+		if isTerminalError(lockErr) {
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = fmt.Sprintf("SMD lock status query failed: %v", lockErr)
+			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+				return fmt.Errorf("set terminal failure after lock status query error: %w", updateErr)
+			}
+			return nil
+		}
+
+		res.Status.ErrorDetail = fmt.Sprintf("SMD lock status query failed: %v", lockErr)
+		res.Status.JobState = "Failed"
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("persist exhausted lock status query transient error as failed: %w", updateErr)
+		}
+		return nil
+	}
+
+	if len(lockConflicts) > 0 {
+		res.Status.LockConflicts = lockConflicts
+		r.Logger.Warnf("FirmwareUpdateJob %s lock conflicts detected: %v", res.GetUID(), lockConflicts)
+
+		if !res.Spec.IgnoreLocks {
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = "SMD lock conflicts detected while ignoreLocks=false"
+			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+				return fmt.Errorf("set failure after lock conflicts: %w", updateErr)
+			}
+			return nil
+		}
 	}
 
 	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, proxyURI, actionURI)
