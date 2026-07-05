@@ -197,3 +197,44 @@ curl -sk -u root:initial0 https://x9000c3s7b1/redfish/v1/UpdateService/FirmwareI
 }
 
 ```
+
+## Bulk Campaign Workflow
+
+Use `FirmwareUpdateCampaign` when you want to fan a single firmware payload out to many targets in one request. The campaign owns the shared payload settings and a `targets` array that lists each BMC to update.
+
+Create the campaign with a single `POST` to `/firmwareupdatecampaigns/`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "x9000-cabinet-01"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "component": "BMC",
+      "ociReference": "127.0.0.1:5000/firmware/cray-bmc:1.10.2",
+      "targets": [
+        {
+          "targetAddress": "x9000c3s7b1",
+          "secretID": "x9000-bmc"
+        },
+        {
+          "targetAddress": "x9000c3s7b2",
+          "secretID": "x9000-bmc"
+        }
+      ]
+    }
+  }'
+```
+
+The response returns the campaign UID immediately. Reconciliation then spawns one `FirmwareUpdateJob` per target and annotates each child job with the parent campaign UID so status aggregation can find the correct children later.
+
+Check progress with the campaign UID:
+
+```bash
+curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/campaign-1a2b3c4d
+```
+
+The `status` block reports the campaign state plus aggregate counts for `total`, `completed`, `failed`, and `pending`, along with the per-target child job list.

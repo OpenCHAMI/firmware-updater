@@ -150,3 +150,46 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/firmwareupdatejob-8eab5b0e
 ```
 
 The output will display a `status` block indicating the `jobState`. The states progress from `Pending` to `Resolving`, and then to either `InProgress`, `Completed`, or `Failed`. If a job fails, the exact network or Redfish error returned by the target hardware will be recorded in the `errorDetail` field.
+
+## 6. Bulk Cabinet Campaigns
+
+`FirmwareUpdateCampaign` is the bulk orchestration resource for cabinet-wide updates. It captures the shared payload settings once and fans the update out to each target listed in `spec.targets`.
+
+### Example Campaign Submission
+
+This payload creates a campaign that will spawn one child job for each listed BMC. Each child job receives the same shared payload settings and its own `targetAddress`/`secretID` pair.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "x9000-cabinet-01"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "component": "BMC",
+      "ociReference": "quay.io/my-org/firmware/cray-bmc:1.10.2",
+      "targets": [
+        {
+          "targetAddress": "10.10.10.50",
+          "secretID": "x9000-bmc"
+        },
+        {
+          "targetAddress": "10.10.10.51",
+          "secretID": "x9000-bmc"
+        }
+      ]
+    }
+  }'
+```
+
+The server returns the campaign resource immediately. Reconciliation then creates individual `FirmwareUpdateJob` children and updates the parent campaign status with aggregate counts and a per-target job list.
+
+### Example Campaign Status Check
+
+```bash
+curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/campaign-1a2b3c4d
+```
+
+The `status.summary` object contains the total number of targets and how many are `completed`, `failed`, or still `pending`. The `status.childJobs` array shows the linked job UID, target address, and current state for each target.

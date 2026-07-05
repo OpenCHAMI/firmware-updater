@@ -13,6 +13,7 @@
 //
 // Generated commands for each resource:
 //   - client health
+//   - client firmwareupdatecampaign [list|get|create|update|patch|delete]
 //   - client firmwareupdatejob [list|get|create|update|patch|delete]
 //
 // Global flags (available for all commands):
@@ -32,25 +33,25 @@
 //
 // Usage examples:
 //
-//	# List all firmwareupdatejobs (default version)
-//	client firmwareupdatejob list
+//	# List all firmwareupdatecampaigns (default version)
+//	client firmwareupdatecampaign list
 //
-//	# List firmwareupdatejobs with specific version
-//	client firmwareupdatejob list --version v2beta1
+//	# List firmwareupdatecampaigns with specific version
+//	client firmwareupdatecampaign list --version v2beta1
 //
-//	# Get FirmwareUpdateJob as v1
-//	client firmwareupdatejob get <uid> --version v1
+//	# Get FirmwareUpdateCampaign as v1
+//	client firmwareupdatecampaign get <uid> --version v1
 //
 //	# Create from JSON file with version
-//	cat firmwareupdatejob.json | client firmwareupdatejob create --version v2beta1
+//	cat firmwareupdatecampaign.json | client firmwareupdatecampaign create --version v2beta1
 //
 //	# Create from inline JSON
-//	client firmwareupdatejob create --spec '{"name":"firmwareupdatejob-01","description":"Example FirmwareUpdateJob"}'
+//	client firmwareupdatecampaign create --spec '{"name":"firmwareupdatecampaign-01","description":"Example FirmwareUpdateCampaign"}'
 //
 //	# Use environment variables
 //	export FIRMWARE_UPDATER_SERVER=https://firmware_updater.example.com
 //	export FIRMWARE_UPDATER_VERSION=v2beta1
-//	client firmwareupdatejob list
+//	client firmwareupdatecampaign list
 //
 // To add custom commands:
 //  1. Add command definition in template after resource commands
@@ -132,6 +133,7 @@ func init() {
 
 	// Add resource commands
 	rootCmd.AddCommand(healthCmd)
+	rootCmd.AddCommand(firmwareupdatecampaignCmd)
 	rootCmd.AddCommand(firmwareupdatejobCmd)
 
 }
@@ -255,6 +257,348 @@ func setNestedField(target map[string]interface{}, path string, value interface{
 	} else {
 		current[finalField] = value
 	}
+}
+
+// FirmwareUpdateCampaign commands
+var firmwareupdatecampaignCmd = &cobra.Command{
+	Use:   "firmwareupdatecampaign",
+	Short: "Manage firmwareupdatecampaigns",
+	Long:  `Create, read, update, patch, and delete firmwareupdatecampaigns.`,
+}
+
+var firmwareupdatecampaignListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all firmwareupdatecampaigns",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		items, err := c.GetFirmwareUpdateCampaigns(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list firmwareupdatecampaigns: %w", err)
+		}
+
+		return printOutput(items)
+	},
+}
+
+var firmwareupdatecampaignGetCmd = &cobra.Command{
+	Use:   "get [uid]",
+	Short: "Get a FirmwareUpdateCampaign by UID",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		item, err := c.GetFirmwareUpdateCampaign(ctx, args[0])
+		if err != nil {
+			return fmt.Errorf("failed to get FirmwareUpdateCampaign: %w", err)
+		}
+
+		return printOutput(item)
+	},
+}
+
+var firmwareupdatecampaignCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a new FirmwareUpdateCampaign",
+	Long: `Create a new FirmwareUpdateCampaign.
+
+Examples:
+  # Create from stdin
+  echo '{"serverProxyAddress": "192.168.1.1", "component": "example-value", "discovery": "{}", "ociReference": "{}", "targets": ["[]"]}' | client firmwareupdatecampaign create
+
+  # Create with --spec flag
+  client firmwareupdatecampaign create --spec '{"serverProxyAddress": "192.168.1.1", "component": "example-value", "discovery": "{}", "ociReference": "{}", "targets": ["[]"]}'
+
+Spec fields:
+  serverProxyAddress (string) [required]
+  component (string)
+  discovery (*v1.DiscoverySpec)
+  ociReference (*string)
+  targets ([]v1.FirmwareCampaignTarget) [required]
+`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		// Read request from flags or stdin
+		reqJSON, _ := cmd.Flags().GetString("spec")
+		var req client.CreateFirmwareUpdateCampaignRequest
+
+		if reqJSON == "" {
+			// Read from stdin if no spec provided
+			decoder := json.NewDecoder(os.Stdin)
+			if err := decoder.Decode(&req); err != nil {
+				return fmt.Errorf("failed to decode request from stdin: %w", err)
+			}
+		} else {
+			// Parse request from JSON string
+			if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+				return fmt.Errorf("failed to parse request JSON: %w", err)
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		item, err := c.CreateFirmwareUpdateCampaign(ctx, req)
+		if err != nil {
+			return fmt.Errorf("failed to create FirmwareUpdateCampaign: %w", err)
+		}
+
+		return printOutput(item)
+	},
+}
+
+var firmwareupdatecampaignUpdateCmd = &cobra.Command{
+	Use:   "update [uid]",
+	Short: "Update an existing FirmwareUpdateCampaign",
+	Long: `Update an existing FirmwareUpdateCampaign.
+
+Examples:
+  # Update from stdin
+  echo '{"serverProxyAddress": "192.168.1.1", "component": "example-value", "discovery": "{}", "ociReference": "{}", "targets": ["[]"]}' | client firmwareupdatecampaign update <uid>
+
+  # Update with --spec flag
+  client firmwareupdatecampaign update <uid> --spec '{"serverProxyAddress": "192.168.1.1", "component": "example-value", "discovery": "{}", "ociReference": "{}", "targets": ["[]"]}'
+
+Spec fields:
+  serverProxyAddress (string) [required]
+  component (string)
+  discovery (*v1.DiscoverySpec)
+  ociReference (*string)
+  targets ([]v1.FirmwareCampaignTarget) [required]
+`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		// Read request from flags or stdin
+		reqJSON, _ := cmd.Flags().GetString("spec")
+		var req client.UpdateFirmwareUpdateCampaignRequest
+
+		if reqJSON == "" {
+			// Read from stdin if no spec provided
+			decoder := json.NewDecoder(os.Stdin)
+			if err := decoder.Decode(&req); err != nil {
+				return fmt.Errorf("failed to decode request from stdin: %w", err)
+			}
+		} else {
+			// Parse request from JSON string
+			if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+				return fmt.Errorf("failed to parse request JSON: %w", err)
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		item, err := c.UpdateFirmwareUpdateCampaign(ctx, args[0], req)
+		if err != nil {
+			return fmt.Errorf("failed to update FirmwareUpdateCampaign: %w", err)
+		}
+
+		return printOutput(item)
+	},
+}
+
+var firmwareupdatecampaignPatchCmd = &cobra.Command{
+	Use:   "patch [uid]",
+	Short: "Patch a FirmwareUpdateCampaign",
+	Long: `Patch an existing FirmwareUpdateCampaign spec using various patch formats.
+
+IMPORTANT: Only the spec portion of the resource can be patched.
+Metadata (name, labels, annotations) and status are managed by the API.
+
+Examples:
+  # JSON Merge Patch (simple merge) - patch spec fields
+  client firmwareupdatecampaign patch <uid> --spec '{"manufacturer":"Intel","model":"Updated Model"}'
+
+  # Shorthand patch (dot notation - most convenient)
+  client firmwareupdatecampaign patch <uid> --set manufacturer=Intel --set model="Updated Model" --unset customField
+
+  # JSON Patch (RFC 6902 - most powerful)
+  client firmwareupdatecampaign patch <uid> --json-patch '[
+    {"op":"replace","path":"/manufacturer","value":"Intel"},
+    {"op":"add","path":"/properties/newField","value":"newValue"}
+  ]'
+
+  # From stdin (JSON Merge Patch format)
+  echo '{"manufacturer":"AMD","partNumber":"RYZEN-9000"}' | client firmwareupdatecampaign patch <uid>
+
+Patch Formats:
+  --spec        JSON Merge Patch (RFC 7386) - simple object merge
+  --set/--unset Shorthand patch - dot notation for convenience
+  --json-patch  JSON Patch (RFC 6902) - operation-based patches
+  stdin         JSON Merge Patch format
+
+Shorthand Operations (spec fields only):
+  --set field=value     Set a spec field value (supports dot notation)
+  --unset field         Remove a spec field (supports dot notation)
+  --add field=value     Add to spec array field (field must end with '.-')
+  --remove field=value  Remove from spec array field
+
+Note: All patch operations target the resource spec only.
+Attempts to patch metadata or status fields will be ignored.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		uid := args[0]
+
+		// Get patch flags
+		specPatch, _ := cmd.Flags().GetString("spec")
+		jsonPatch, _ := cmd.Flags().GetString("json-patch")
+		setPairs, _ := cmd.Flags().GetStringArray("set")
+		unsetFields, _ := cmd.Flags().GetStringArray("unset")
+		addPairs, _ := cmd.Flags().GetStringArray("add")
+		removePairs, _ := cmd.Flags().GetStringArray("remove")
+
+		var patchData []byte
+		var contentType string
+
+		// Determine patch format and build patch data
+		if jsonPatch != "" {
+			// JSON Patch (RFC 6902)
+			patchData = []byte(jsonPatch)
+			contentType = "application/json-patch+json"
+		} else if len(setPairs) > 0 || len(unsetFields) > 0 || len(addPairs) > 0 || len(removePairs) > 0 {
+			// Shorthand patch - convert to JSON Merge Patch
+			patch := make(map[string]interface{})
+
+			// Process --set flags
+			for _, setPair := range setPairs {
+				parts := strings.SplitN(setPair, "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid --set format: %s (expected field=value)", setPair)
+				}
+				setNestedField(patch, parts[0], parts[1])
+			}
+
+			// Process --unset flags
+			for _, field := range unsetFields {
+				setNestedField(patch, field, nil)
+			}
+
+			// Process --add flags (add to arrays)
+			for _, addPair := range addPairs {
+				parts := strings.SplitN(addPair, "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid --add format: %s (expected field=value)", addPair)
+				}
+				// For arrays, we'll use JSON Merge Patch append syntax if possible
+				// Otherwise convert to JSON Patch
+				setNestedField(patch, parts[0], parts[1])
+			}
+
+			// Process --remove flags
+			for _, removePair := range removePairs {
+				parts := strings.SplitN(removePair, "=", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid --remove format: %s (expected field=value)", removePair)
+				}
+				// Remove operations are complex and might need JSON Patch
+				// For now, we'll handle simple cases
+				return fmt.Errorf("--remove operations require --json-patch format")
+			}
+
+			patchBytes, err := json.Marshal(patch)
+			if err != nil {
+				return fmt.Errorf("failed to marshal shorthand patch: %w", err)
+			}
+			patchData = patchBytes
+			contentType = "application/merge-patch+json"
+		} else if specPatch != "" {
+			// JSON Merge Patch from --spec
+			patchData = []byte(specPatch)
+			contentType = "application/merge-patch+json"
+		} else {
+			// Read from stdin (default to JSON Merge Patch)
+			decoder := json.NewDecoder(os.Stdin)
+			var patch interface{}
+			if err := decoder.Decode(&patch); err != nil {
+				return fmt.Errorf("failed to decode patch from stdin: %w", err)
+			}
+			patchBytes, err := json.Marshal(patch)
+			if err != nil {
+				return fmt.Errorf("failed to marshal patch: %w", err)
+			}
+			patchData = patchBytes
+			contentType = "application/merge-patch+json"
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		item, err := c.PatchFirmwareUpdateCampaign(ctx, uid, patchData, contentType)
+		if err != nil {
+			return fmt.Errorf("failed to patch FirmwareUpdateCampaign: %w", err)
+		}
+
+		return printOutput(item)
+	},
+}
+
+var firmwareupdatecampaignDeleteCmd = &cobra.Command{
+	Use:   "delete [uid]",
+	Short: "Delete a FirmwareUpdateCampaign",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, err := getClient()
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		if err := c.DeleteFirmwareUpdateCampaign(ctx, args[0]); err != nil {
+			return fmt.Errorf("failed to delete FirmwareUpdateCampaign: %w", err)
+		}
+
+		fmt.Printf("FirmwareUpdateCampaign %s deleted successfully\n", args[0])
+		return nil
+	},
+}
+
+func init() {
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignListCmd)
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignGetCmd)
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignCreateCmd)
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignUpdateCmd)
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignPatchCmd)
+	firmwareupdatecampaignCmd.AddCommand(firmwareupdatecampaignDeleteCmd)
+
+	// Add spec flag for create and update commands
+	firmwareupdatecampaignCreateCmd.Flags().String("spec", "", "FirmwareUpdateCampaign specification in JSON format")
+	firmwareupdatecampaignUpdateCmd.Flags().String("spec", "", "FirmwareUpdateCampaign specification in JSON format")
+
+	// Add patch command flags
+	firmwareupdatecampaignPatchCmd.Flags().String("spec", "", "JSON Merge Patch specification")
+	firmwareupdatecampaignPatchCmd.Flags().String("json-patch", "", "JSON Patch operations (RFC 6902)")
+	firmwareupdatecampaignPatchCmd.Flags().StringArray("set", nil, "Set field value using dot notation (field=value)")
+	firmwareupdatecampaignPatchCmd.Flags().StringArray("unset", nil, "Unset field using dot notation")
+	firmwareupdatecampaignPatchCmd.Flags().StringArray("add", nil, "Add value to array field (field=value)")
+	firmwareupdatecampaignPatchCmd.Flags().StringArray("remove", nil, "Remove value from array field (field=value)")
 }
 
 // FirmwareUpdateJob commands

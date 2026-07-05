@@ -38,6 +38,53 @@ func QueryResourcesByLabels(ctx context.Context, kind string, labels map[string]
 	return q, nil
 }
 
+// Queryfirmwareupdatecampaigns returns a query builder for firmwareupdatecampaigns
+func Queryfirmwareupdatecampaigns(ctx context.Context) *ent.ResourceQuery {
+	return QueryResources(ctx, "FirmwareUpdateCampaign")
+}
+
+// GetFirmwareUpdateCampaignByUID loads a single FirmwareUpdateCampaign by UID
+func GetFirmwareUpdateCampaignByUID(ctx context.Context, uid string) (*v1.FirmwareUpdateCampaign, error) {
+	ensureEntClient()
+	r, err := entClient.Resource.Query().
+		Where(entresource.UIDEQ(uid), entresource.KindEQ("FirmwareUpdateCampaign")).
+		WithLabels().
+		WithAnnotations().
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to load FirmwareUpdateCampaign %s: %w", uid, err)
+	}
+	v, err := FromEntResource(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return v.(*v1.FirmwareUpdateCampaign), nil
+}
+
+// ListfirmwareupdatecampaignsByLabels returns firmwareupdatecampaigns matching all provided labels
+func ListfirmwareupdatecampaignsByLabels(ctx context.Context, labels map[string]string) ([]*v1.FirmwareUpdateCampaign, error) {
+	q, err := QueryResourcesByLabels(ctx, "FirmwareUpdateCampaign", labels)
+	if err != nil {
+		return nil, err
+	}
+	rs, err := q.WithLabels().WithAnnotations().All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*v1.FirmwareUpdateCampaign, 0, len(rs))
+	for _, r := range rs {
+		v, err := FromEntResource(ctx, r)
+		if err != nil {
+			continue
+		}
+		out = append(out, v.(*v1.FirmwareUpdateCampaign))
+	}
+	return out, nil
+}
+
 // Queryfirmwareupdatejobs returns a query builder for firmwareupdatejobs
 func Queryfirmwareupdatejobs(ctx context.Context) *ent.ResourceQuery {
 	return QueryResources(ctx, "FirmwareUpdateJob")

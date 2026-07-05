@@ -41,6 +41,22 @@ import (
 	"github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 )
 
+// CreateFirmwareUpdateCampaignRequest represents a request to create a FirmwareUpdateCampaign
+type CreateFirmwareUpdateCampaignRequest struct {
+	Metadata    fabrica.Metadata              `json:"metadata" validate:"required"`
+	Spec        v1.FirmwareUpdateCampaignSpec `json:"spec" validate:"required"`
+	Labels      map[string]string             `json:"labels,omitempty"`
+	Annotations map[string]string             `json:"annotations,omitempty"`
+}
+
+// UpdateFirmwareUpdateCampaignRequest represents a request to update a FirmwareUpdateCampaign
+type UpdateFirmwareUpdateCampaignRequest struct {
+	Metadata    fabrica.Metadata              `json:"metadata,omitempty"`
+	Spec        v1.FirmwareUpdateCampaignSpec `json:"spec,omitempty" validate:"omitempty"`
+	Labels      map[string]string             `json:"labels,omitempty"`
+	Annotations map[string]string             `json:"annotations,omitempty"`
+}
+
 // CreateFirmwareUpdateJobRequest represents a request to create a FirmwareUpdateJob
 type CreateFirmwareUpdateJobRequest struct {
 	Metadata    fabrica.Metadata         `json:"metadata" validate:"required"`

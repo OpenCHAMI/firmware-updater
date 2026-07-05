@@ -31,6 +31,27 @@ func ToEntResource(fabricaResource interface{}) (*ent.ResourceCreate, map[string
 
 	switch v := fabricaResource.(type) {
 
+	case *v1.FirmwareUpdateCampaign:
+		apiVersion = v.APIVersion
+		kind = v.Kind
+		name = v.Metadata.Name
+		uid = v.Metadata.UID
+		labels = v.Metadata.Labels
+		annotations = v.Metadata.Annotations
+		createdAt = v.Metadata.CreatedAt
+		updatedAt = v.Metadata.UpdatedAt
+
+		var err error
+		spec, err = json.Marshal(v.Spec)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to marshal spec: %w", err)
+		}
+
+		status, err = json.Marshal(v.Status)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to marshal status: %w", err)
+		}
+
 	case *v1.FirmwareUpdateJob:
 		apiVersion = v.APIVersion
 		kind = v.Kind
@@ -78,6 +99,49 @@ func ToEntResource(fabricaResource interface{}) (*ent.ResourceCreate, map[string
 // This function unmarshals the JSON Spec/Status back into typed structs.
 func FromEntResource(ctx context.Context, entResource *ent.Resource) (interface{}, error) {
 	switch entResource.Kind {
+
+	case "FirmwareUpdateCampaign":
+		resource := &v1.FirmwareUpdateCampaign{
+
+			APIVersion: entResource.APIVersion,
+			Kind:       entResource.Kind,
+			Metadata: fabrica.Metadata{
+				Name:        entResource.Name,
+				UID:         entResource.UID,
+				CreatedAt:   entResource.CreatedAt,
+				UpdatedAt:   entResource.UpdatedAt,
+				Labels:      make(map[string]string),
+				Annotations: make(map[string]string),
+			},
+		}
+
+		// Unmarshal Spec
+		if err := json.Unmarshal(entResource.Spec, &resource.Spec); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal spec for FirmwareUpdateCampaign: %w", err)
+		}
+
+		// Unmarshal Status
+		if len(entResource.Status) > 0 && string(entResource.Status) != "null" {
+			if err := json.Unmarshal(entResource.Status, &resource.Status); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal status for FirmwareUpdateCampaign: %w", err)
+			}
+		}
+
+		// Load labels from edges
+		if entResource.Edges.Labels != nil {
+			for _, label := range entResource.Edges.Labels {
+				resource.Metadata.Labels[label.Key] = label.Value
+			}
+		}
+
+		// Load annotations from edges
+		if entResource.Edges.Annotations != nil {
+			for _, ann := range entResource.Edges.Annotations {
+				resource.Metadata.Annotations[ann.Key] = ann.Value
+			}
+		}
+
+		return resource, nil
 
 	case "FirmwareUpdateJob":
 		resource := &v1.FirmwareUpdateJob{

@@ -104,6 +104,7 @@ func GenerateOpenAPISpec() *openapi3.T {
 	}
 
 	// Register all resource paths
+	registerFirmwareUpdateCampaignPaths(spec)
 	registerFirmwareUpdateJobPaths(spec)
 
 	// Register /health endpoint
@@ -187,6 +188,229 @@ func GenerateOpenAPISpec() *openapi3.T {
 	registerCustomOpenAPIPaths(spec)
 
 	return spec
+}
+
+// registerFirmwareUpdateCampaignPaths registers OpenAPI paths for FirmwareUpdateCampaign resources
+func registerFirmwareUpdateCampaignPaths(spec *openapi3.T) {
+	// Generate schemas from Go types - NO ANNOTATIONS NEEDED
+	resourceSchema, _ := openapi3gen.NewSchemaRefForValue(&v1.FirmwareUpdateCampaign{}, spec.Components.Schemas)
+	spec.Components.Schemas["FirmwareUpdateCampaign"] = resourceSchema
+
+	createReqSchema, _ := openapi3gen.NewSchemaRefForValue(&CreateFirmwareUpdateCampaignRequest{}, spec.Components.Schemas)
+	spec.Components.Schemas["CreateFirmwareUpdateCampaignRequest"] = createReqSchema
+
+	updateReqSchema, _ := openapi3gen.NewSchemaRefForValue(&UpdateFirmwareUpdateCampaignRequest{}, spec.Components.Schemas)
+	spec.Components.Schemas["UpdateFirmwareUpdateCampaignRequest"] = updateReqSchema
+
+	statusSchema, _ := openapi3gen.NewSchemaRefForValue(&v1.FirmwareUpdateCampaignStatus{}, spec.Components.Schemas)
+	spec.Components.Schemas["FirmwareUpdateCampaignStatus"] = statusSchema
+
+	// Error response schema
+	if _, exists := spec.Components.Schemas["ErrorResponse"]; !exists {
+		errorSchema := openapi3.NewObjectSchema().
+			WithProperty("error", openapi3.NewStringSchema()).
+			WithRequired([]string{"error"})
+		spec.Components.Schemas["ErrorResponse"] = &openapi3.SchemaRef{Value: errorSchema}
+	}
+
+	// DELETE response schema
+	if _, exists := spec.Components.Schemas["DeleteResponse"]; !exists {
+		deleteSchema, _ := openapi3gen.NewSchemaRefForValue(&DeleteResponse{}, spec.Components.Schemas)
+		spec.Components.Schemas["DeleteResponse"] = deleteSchema
+	}
+
+	// List FirmwareUpdateCampaigns operation
+	listOp := openapi3.NewOperation()
+	listOp.OperationID = "listFirmwareUpdateCampaigns"
+	listOp.Summary = "List all FirmwareUpdateCampaign resources"
+	listOp.Description = "Returns a list of all FirmwareUpdateCampaign resources in the inventory"
+	listOp.Tags = []string{"FirmwareUpdateCampaign"}
+	listOp.Responses = openapi3.NewResponses()
+	arraySchema := openapi3.NewArraySchema()
+	arraySchema.Items = &openapi3.SchemaRef{Ref: "#/components/schemas/FirmwareUpdateCampaign"}
+	listOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Successful response").
+			WithJSONSchemaRef(&openapi3.SchemaRef{Value: arraySchema}),
+	})
+	listOp.Responses.Set("500", errorResponse())
+
+	// Create FirmwareUpdateCampaign operation
+	createOp := openapi3.NewOperation()
+	createOp.OperationID = "createFirmwareUpdateCampaign"
+	createOp.Summary = "Create a new FirmwareUpdateCampaign resource"
+	createOp.Description = "Creates a new FirmwareUpdateCampaign resource with the provided specification"
+	createOp.Tags = []string{"FirmwareUpdateCampaign"}
+	createOp.RequestBody = &openapi3.RequestBodyRef{
+		Value: openapi3.NewRequestBody().
+			WithRequired(true).
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/CreateFirmwareUpdateCampaignRequest",
+			}),
+	}
+	createOp.Responses = openapi3.NewResponses()
+	createOp.Responses.Set("201", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Resource created successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/FirmwareUpdateCampaign",
+			}),
+	})
+	createOp.Responses.Set("400", errorResponse())
+	createOp.Responses.Set("500", errorResponse())
+
+	// Get FirmwareUpdateCampaign operation
+	getOp := openapi3.NewOperation()
+	getOp.OperationID = "getFirmwareUpdateCampaign"
+	getOp.Summary = "Get a specific FirmwareUpdateCampaign resource"
+	getOp.Description = "Returns details of a specific FirmwareUpdateCampaign resource by UID"
+	getOp.Tags = []string{"FirmwareUpdateCampaign"}
+	getOp.Responses = openapi3.NewResponses()
+	getOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Successful response").
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/FirmwareUpdateCampaign",
+			}),
+	})
+	getOp.Responses.Set("404", errorResponse())
+	getOp.Responses.Set("500", errorResponse())
+
+	// Update FirmwareUpdateCampaign operation
+	updateOp := openapi3.NewOperation()
+	updateOp.OperationID = "updateFirmwareUpdateCampaign"
+	updateOp.Summary = "Update a FirmwareUpdateCampaign resource"
+	updateOp.Description = "Updates an existing FirmwareUpdateCampaign resource with new values"
+	updateOp.Tags = []string{"FirmwareUpdateCampaign"}
+	updateOp.RequestBody = &openapi3.RequestBodyRef{
+		Value: openapi3.NewRequestBody().
+			WithRequired(true).
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/UpdateFirmwareUpdateCampaignRequest",
+			}),
+	}
+	updateOp.Responses = openapi3.NewResponses()
+	updateOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Resource updated successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/FirmwareUpdateCampaign",
+			}),
+	})
+	updateOp.Responses.Set("400", errorResponse())
+	updateOp.Responses.Set("404", errorResponse())
+	updateOp.Responses.Set("500", errorResponse())
+
+	// Patch FirmwareUpdateCampaign operation
+	patchOp := openapi3.NewOperation()
+	patchOp.OperationID = "patchFirmwareUpdateCampaign"
+	patchOp.Summary = "Patch a FirmwareUpdateCampaign resource"
+	patchOp.Description = "Partially updates an existing FirmwareUpdateCampaign resource using patch semantics"
+	patchOp.Tags = []string{"FirmwareUpdateCampaign"}
+	patchOp.RequestBody = patchRequestBody()
+	patchOp.Responses = openapi3.NewResponses()
+	patchOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Resource patched successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/FirmwareUpdateCampaign",
+			}),
+	})
+	patchOp.Responses.Set("400", errorResponse())
+	patchOp.Responses.Set("404", errorResponse())
+	patchOp.Responses.Set("422", errorResponse())
+	patchOp.Responses.Set("500", errorResponse())
+
+	// Update FirmwareUpdateCampaign status operation
+	updateStatusOp := openapi3.NewOperation()
+	updateStatusOp.OperationID = "updateFirmwareUpdateCampaignStatus"
+	updateStatusOp.Summary = "Update FirmwareUpdateCampaign status"
+	updateStatusOp.Description = "Updates only the status subresource for an existing FirmwareUpdateCampaign"
+	updateStatusOp.Tags = []string{"FirmwareUpdateCampaign"}
+	updateStatusOp.RequestBody = &openapi3.RequestBodyRef{
+		Value: openapi3.NewRequestBody().
+			WithRequired(true).
+			WithJSONSchemaRef(&openapi3.SchemaRef{Ref: "#/components/schemas/FirmwareUpdateCampaignStatus"}),
+	}
+	updateStatusOp.Responses = openapi3.NewResponses()
+	updateStatusOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Status updated successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{Ref: "#/components/schemas/FirmwareUpdateCampaign"}),
+	})
+	updateStatusOp.Responses.Set("400", errorResponse())
+	updateStatusOp.Responses.Set("404", errorResponse())
+	updateStatusOp.Responses.Set("500", errorResponse())
+
+	// Patch FirmwareUpdateCampaign status operation
+	patchStatusOp := openapi3.NewOperation()
+	patchStatusOp.OperationID = "patchFirmwareUpdateCampaignStatus"
+	patchStatusOp.Summary = "Patch FirmwareUpdateCampaign status"
+	patchStatusOp.Description = "Partially updates only the status subresource for an existing FirmwareUpdateCampaign"
+	patchStatusOp.Tags = []string{"FirmwareUpdateCampaign"}
+	patchStatusOp.RequestBody = patchRequestBody()
+	patchStatusOp.Responses = openapi3.NewResponses()
+	patchStatusOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Status patched successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{Ref: "#/components/schemas/FirmwareUpdateCampaign"}),
+	})
+	patchStatusOp.Responses.Set("400", errorResponse())
+	patchStatusOp.Responses.Set("404", errorResponse())
+	patchStatusOp.Responses.Set("422", errorResponse())
+	patchStatusOp.Responses.Set("500", errorResponse())
+
+	// Delete FirmwareUpdateCampaign operation
+	deleteOp := openapi3.NewOperation()
+	deleteOp.OperationID = "deleteFirmwareUpdateCampaign"
+	deleteOp.Summary = "Delete a FirmwareUpdateCampaign resource"
+	deleteOp.Description = "Removes a FirmwareUpdateCampaign resource from the inventory"
+	deleteOp.Tags = []string{"FirmwareUpdateCampaign"}
+	deleteOp.Responses = openapi3.NewResponses()
+	deleteOp.Responses.Set("200", &openapi3.ResponseRef{
+		Value: openapi3.NewResponse().
+			WithDescription("Resource deleted successfully").
+			WithJSONSchemaRef(&openapi3.SchemaRef{
+				Ref: "#/components/schemas/DeleteResponse",
+			}),
+	})
+	deleteOp.Responses.Set("400", errorResponse())
+	deleteOp.Responses.Set("404", errorResponse())
+	deleteOp.Responses.Set("500", errorResponse())
+
+	// Create path items
+	collectionPath := &openapi3.PathItem{
+		Get:  listOp,
+		Post: createOp,
+	}
+
+	uidParam := openapi3.NewPathParameter("uid").
+		WithDescription("Unique identifier of the FirmwareUpdateCampaign resource").
+		WithRequired(true).
+		WithSchema(openapi3.NewStringSchema())
+
+	itemPath := &openapi3.PathItem{
+		Get:    getOp,
+		Put:    updateOp,
+		Patch:  patchOp,
+		Delete: deleteOp,
+		Parameters: []*openapi3.ParameterRef{
+			{Value: uidParam},
+		},
+	}
+
+	statusPath := &openapi3.PathItem{
+		Put:   updateStatusOp,
+		Patch: patchStatusOp,
+		Parameters: []*openapi3.ParameterRef{
+			{Value: uidParam},
+		},
+	}
+
+	// Add paths to spec
+	spec.Paths.Set("/firmwareupdatecampaigns", collectionPath)
+	spec.Paths.Set("/firmwareupdatecampaigns/{uid}", itemPath)
+	spec.Paths.Set("/firmwareupdatecampaigns/{uid}/status", statusPath)
 }
 
 // registerFirmwareUpdateJobPaths registers OpenAPI paths for FirmwareUpdateJob resources

@@ -38,6 +38,7 @@ Examples:
   firmware_updater export --format yaml --output ./backup
 
   # Export specific resource types
+  firmware_updater export --kinds FirmwareUpdateCampaign --output ./firmwareupdatecampaign-backup
   firmware_updater export --kinds FirmwareUpdateJob --output ./firmwareupdatejob-backup
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,7 +75,7 @@ func runExport(ctx context.Context, format, output string, kinds []string, perTy
 		resourceKinds = kinds
 	} else {
 		// Export all known resource types
-		resourceKinds = []string{"FirmwareUpdateJob"}
+		resourceKinds = []string{"FirmwareUpdateCampaign", "FirmwareUpdateJob"}
 	}
 
 	totalExported := 0
@@ -98,6 +99,14 @@ func exportResourceKind(ctx context.Context, kind, output, format string, perTyp
 	var err error
 
 	switch kind {
+	case "FirmwareUpdateCampaign":
+		items, e := storage.Queryfirmwareupdatecampaigns(ctx).All(ctx)
+		if e != nil {
+			return 0, fmt.Errorf("failed to query firmwareupdatecampaigns: %w", e)
+		}
+		for _, item := range items {
+			resources = append(resources, item)
+		}
 	case "FirmwareUpdateJob":
 		items, e := storage.Queryfirmwareupdatejobs(ctx).All(ctx)
 		if e != nil {
