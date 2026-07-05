@@ -53,6 +53,50 @@ func TestSelectManifestCandidateInvalidTarget(t *testing.T) {
 	}
 }
 
+func TestSelectNewerManifestCandidate(t *testing.T) {
+	candidates := []manifestCandidate{
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+	}
+
+	selected, updateAvailable, err := selectNewerManifestCandidate(candidates, "nc.1.2.0-build42")
+	if err != nil {
+		t.Fatalf("selectNewerManifestCandidate returned error: %v", err)
+	}
+	if !updateAvailable {
+		t.Fatalf("expected update to be available")
+	}
+	if selected.tag != "tag-b" {
+		t.Fatalf("expected tag-b, got %s", selected.tag)
+	}
+}
+
+func TestSelectNewerManifestCandidateNoUpdateNeeded(t *testing.T) {
+	candidates := []manifestCandidate{
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+	}
+
+	_, updateAvailable, err := selectNewerManifestCandidate(candidates, "1.3.0")
+	if err != nil {
+		t.Fatalf("selectNewerManifestCandidate returned error: %v", err)
+	}
+	if updateAvailable {
+		t.Fatalf("expected no update to be available")
+	}
+}
+
+func TestIsCompatibleHardwareAny(t *testing.T) {
+	annotation := "x1000, x2000; x3000"
+
+	if !isCompatibleHardwareAny(annotation, []string{"foo", "x2000"}) {
+		t.Fatalf("expected x2000 to match compatibility annotation")
+	}
+	if isCompatibleHardwareAny(annotation, []string{"foo", "bar"}) {
+		t.Fatalf("did not expect non-matching hints to match compatibility annotation")
+	}
+}
+
 func TestIsCompatibleHardware(t *testing.T) {
 	annotation := "x1000, x2000; x3000"
 

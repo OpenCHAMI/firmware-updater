@@ -13,15 +13,17 @@ import (
 )
 
 const (
-	CampaignStatePending    = "Pending"
-	CampaignStateInProgress = "InProgress"
-	CampaignStateCompleted  = "Completed"
-	CampaignStateFailed     = "Failed"
+	CampaignStatePending             = "Pending"
+	CampaignStateInProgress          = "InProgress"
+	CampaignStateCompleted           = "Completed"
+	CampaignStateCompletedWithErrors = "CompletedWithErrors"
+	CampaignStateFailed              = "Failed"
 )
 
 const (
-	CampaignUIDAnnotation    = "campaign-uid"
-	CampaignTargetAnnotation = "campaign-target"
+	CampaignUIDAnnotation      = "campaign-uid"
+	CampaignTargetAnnotation   = "campaign-target"
+	CampaignChildKeyAnnotation = "campaign-child-key"
 )
 
 // FirmwareUpdateCampaign represents a bulk update operation.
@@ -77,6 +79,7 @@ func (r *FirmwareUpdateCampaign) Validate(ctx context.Context) error {
 
 	hasOCIReference := r.Spec.OCIReference != nil && strings.TrimSpace(*r.Spec.OCIReference) != ""
 	hasDiscovery := r.Spec.Discovery != nil
+	hasComponent := strings.TrimSpace(r.Spec.Component) != ""
 
 	if r.Spec.OCIReference != nil && strings.TrimSpace(*r.Spec.OCIReference) == "" {
 		return fmt.Errorf("spec.ociReference must not be empty when provided")
@@ -86,16 +89,26 @@ func (r *FirmwareUpdateCampaign) Validate(ctx context.Context) error {
 		if strings.TrimSpace(r.Spec.Discovery.Repository) == "" {
 			return fmt.Errorf("spec.discovery.repository must be provided")
 		}
-		if strings.TrimSpace(r.Spec.Discovery.HardwareModel) == "" {
-			return fmt.Errorf("spec.discovery.hardwareModel must be provided")
-		}
-		if strings.TrimSpace(r.Spec.Discovery.Version) == "" {
-			return fmt.Errorf("spec.discovery.version must be provided")
+		if hasComponent {
+			if strings.TrimSpace(r.Spec.Discovery.HardwareModel) == "" {
+				return fmt.Errorf("spec.discovery.hardwareModel must be provided when spec.component is set")
+			}
+			if strings.TrimSpace(r.Spec.Discovery.Version) == "" {
+				return fmt.Errorf("spec.discovery.version must be provided when spec.component is set")
+			}
 		}
 	}
 
-	if hasOCIReference == hasDiscovery {
-		return fmt.Errorf("exactly one of spec.ociReference or spec.discovery must be provided")
+	if hasOCIReference && hasDiscovery {
+		return fmt.Errorf("spec.ociReference and spec.discovery are mutually exclusive")
+	}
+
+	if !hasOCIReference && !hasDiscovery {
+		return fmt.Errorf("one of spec.ociReference or spec.discovery must be provided")
+	}
+
+	if hasOCIReference && !hasComponent {
+		return fmt.Errorf("spec.component must be provided when spec.ociReference is used")
 	}
 
 	if len(r.Spec.Targets) == 0 {

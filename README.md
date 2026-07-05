@@ -200,7 +200,13 @@ curl -sk -u root:initial0 https://x9000c3s7b1/redfish/v1/UpdateService/FirmwareI
 
 ## Bulk Campaign Workflow
 
-Use `FirmwareUpdateCampaign` when you want to fan a single firmware payload out to many targets in one request. The campaign owns the shared payload settings and a `targets` array that lists each BMC to update.
+Use `FirmwareUpdateCampaign` when you want to fan firmware updates out to many targets in one request. The campaign owns the shared payload settings and a `targets` array that lists each BMC to update.
+
+Campaigns support three modes:
+
+1. Explicit payload mode: set `spec.ociReference` and `spec.component`.
+2. Component discovery mode: set `spec.discovery` with `repository`, `hardwareModel`, and `version`, plus `spec.component`.
+3. Universal cabinet discovery mode: set only `spec.discovery.repository` and omit both `spec.component` and `spec.ociReference`.
 
 Create the campaign with a single `POST` to `/firmwareupdatecampaigns/`:
 
@@ -231,10 +237,45 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
 
 The response returns the campaign UID immediately. Reconciliation then spawns one `FirmwareUpdateJob` per target and annotates each child job with the parent campaign UID so status aggregation can find the correct children later.
 
+### Universal Cabinet Discovery
+
+Universal mode lets the campaign inspect each target's Redfish firmware inventory and decide which components actually need an update. The campaign:
+
+1. Crawls `/redfish/v1/UpdateService/FirmwareInventory` for every target.
+2. Derives component-specific repository candidates from the configured base repository path, for example `127.0.0.1:5002/firmware/bmc` for a discovered `BMC` component.
+3. Compares the installed Redfish firmware version to the highest compatible OCI manifest version.
+4. Creates child jobs only for components where a newer payload exists.
+
+Submit a universal campaign like this:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "x9000-cabinet-universal"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "discovery": {
+        "repository": "127.0.0.1:5000/firmware"
+      },
+      "targets": [
+        {
+          "targetAddress": "x9000c3s7b1",
+          "secretID": "x9000-bmc"
+        }
+      ]
+    }
+  }'
+```
+
+Each generated child job bypasses its own auto-discovery step by carrying the exact `spec.ociReference` and exact Redfish `spec.targets` URI discovered by the campaign.
+
 Check progress with the campaign UID:
 
 ```bash
 curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/campaign-1a2b3c4d
 ```
 
-The `status` block reports the campaign state plus aggregate counts for `total`, `completed`, `failed`, and `pending`, along with the per-target child job list.
+The `status` block reports the campaign state plus aggregate counts for `total`, `completed`, `failed`, and `pending`, along with the per-target child job list. In universal mode, `summary.total` counts child jobs across all discovered components, not just the number of BMC addresses. Campaigns now also report `CompletedWithErrors` when some child jobs succeed and others fail.

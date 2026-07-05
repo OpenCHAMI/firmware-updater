@@ -2,117 +2,100 @@
 
 ## 1. Implementation Summary
 
-`FirmwareUpdateCampaign` is now a first-class resource for bulk cabinet updates. A campaign carries the shared payload settings once, plus a `targets` array containing each BMC target and its `secretID`.
+`FirmwareUpdateCampaign` now supports a universal cabinet mode in addition to the existing explicit and component-discovery modes.
 
-When a campaign is created, the reconciler spawns one `FirmwareUpdateJob` per target, assigns each child job a stable UID before persistence, and annotates the child with:
+What changed:
 
-- `campaign-uid`: the parent campaign UID
-- `campaign-target`: the target address for that child job
+- Campaign validation now accepts `spec.discovery.repository` by itself when both `spec.component` and `spec.ociReference` are omitted.
+- The campaign reconciler can crawl Redfish firmware inventory for every target, derive component-specific repository paths from a base repository, compare installed Redfish firmware versions against OCI manifest versions, and create child jobs only for components that actually need an update.
+- Universal child jobs bypass their own auto-discovery by receiving the exact resolved `spec.ociReference` and exact Redfish `spec.targets` member URI from the campaign.
+- Child jobs are linked with:
+  - `campaign-uid`
+  - `campaign-target`
+  - `campaign-child-key`
+- Campaign aggregation now counts actual child jobs, not just input targets, and adds the terminal state `CompletedWithErrors` for mixed success/failure batches.
 
-The campaign status is aggregated from those child jobs and reports:
-
-- `campaignState`
-- `summary.total`
-- `summary.completed`
-- `summary.failed`
-- `summary.pending`
-- `childJobs[]` with per-target job UID and job state
-
-The user-facing docs were updated in both [README.md](../README.md) and [docs/user-guide.md](../docs/user-guide.md).
+Docs were updated in [README.md](../README.md) and [docs/user-guide.md](../docs/user-guide.md).
 
 ## 2. Exact Verified curl Command
 
-This command was executed successfully against the live server and returned a created campaign with two child jobs linked to it:
+This command was executed successfully against a live local server on `2026-07-05`:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:18091/firmwareupdatecampaigns/ \
+curl -sS -X POST http://127.0.0.1:18093/firmwareupdatecampaigns/ \
   -H 'Content-Type: application/json' \
-  -d '{
-    "metadata": {
-      "name": "cabinet-demo"
-    },
-    "spec": {
-      "serverProxyAddress": "127.0.0.1",
-      "component": "BMC",
-      "ociReference": "127.0.0.1:5000/firmware/test-bmc:1.0.0",
-      "targets": [
-        {
-          "targetAddress": "127.0.0.1",
-          "secretID": "campaign-bmc"
-        },
-        {
-          "targetAddress": "192.0.2.11",
-          "secretID": "campaign-bmc"
-        }
-      ]
-    }
-  }'
+  -d '{"metadata":{"name":"auto-cabinet-e2e"},"spec":{"serverProxyAddress":"127.0.0.1","discovery":{"repository":"127.0.0.1:5002/firmware"},"targets":[{"targetAddress":"127.0.0.1:18443","secretID":"cabinet-bmc"}]}}'
 ```
 
 Observed result:
 
-- Campaign UID: `firmwareupdatecampaign-07e9ef0d`
-- Child job UIDs:
-  - `firmwareupdatejob-2507543a`
-  - `firmwareupdatejob-c3694556`
-- Campaign status after reconciliation:
-  - `campaignState: InProgress`
-  - `summary.total: 2`
-  - `summary.pending: 2`
+- Campaign UID: `firmwareupdatecampaign-2730c710`
+- Reconciled campaign state: `InProgress`
+- Reconciled summary:
+  - `total: 1`
+  - `pending: 1`
+  - `completed: 0`
+  - `failed: 0`
+- Generated child job:
+  - UID: `firmwareupdatejob-2f558849`
+  - `spec.ociReference: 127.0.0.1:5002/firmware/bmc:1.1.0`
+  - `spec.targets[0]: /redfish/v1/UpdateService/FirmwareInventory/BMC`
+
+The live Redfish mock advertised both `BMC` and `BIOS`. Only the outdated `BMC` component produced a child job; the `BIOS` component was skipped because its installed version was already newer than the repository payload.
 
 ## 3. Usage Notes
 
-### 3.1 Campaign payload shape
+### 3.1 Campaign modes
 
-Use `POST /firmwareupdatecampaigns/` with:
+Use one of these payload shapes:
 
-- `metadata.name` for a human-readable campaign name
-- `spec.serverProxyAddress` for the routable proxy address
-- exactly one of `spec.ociReference` or `spec.discovery`
-- `spec.component` when the child jobs should auto-discover the Redfish update target by component name
-- `spec.targets[]` with one object per BMC
+- Explicit mode: `spec.ociReference` + `spec.component`
+- Component discovery mode: `spec.discovery.repository` + `spec.discovery.hardwareModel` + `spec.discovery.version` + `spec.component`
+- Universal cabinet mode: `spec.discovery.repository` only
 
-Each entry in `spec.targets` must include:
+Universal mode intentionally treats `spec.discovery.repository` as a base path. For a discovered component like `BMC`, the reconciler first checks `.../bmc`, then a compact slug variant if needed, and finally falls back to the base repository path.
 
-- `targetAddress`
-- `secretID`
+### 3.2 Version and inventory behavior
 
-### 3.2 How child jobs are linked
+- Firmware inventory is read from `/redfish/v1/UpdateService/FirmwareInventory`.
+- Each member detail is inspected for `Id`, `Name`, `Version`, and `RelatedItem` hints.
+- Redfish versions are normalized with a semantic-version substring match when possible, so strings like `nc.1.0.0-build1` still compare correctly against OCI annotations like `1.1.0`.
+- If no newer compatible artifact exists for a discovered component, no child job is created for that component.
 
-Child jobs are annotated during reconciliation so the parent campaign can re-find them later:
+### 3.3 Child job linkage and aggregation
 
-- `campaign-uid` lets the campaign status aggregator query the correct children
-- `campaign-target` preserves the target address even if the child job name changes
+- `campaign-uid` links all child jobs back to the parent campaign.
+- `campaign-target` preserves the original BMC address.
+- `campaign-child-key` disambiguates multiple component-specific child jobs for the same BMC.
 
-The child job name is derived from the campaign name and target address, but the annotation is the actual linkage used for aggregation.
+Campaign state rules now are:
 
-### 3.3 Status behavior
-
-The campaign status is not a static echo of the request. Reconciliation updates it based on the child jobs it can observe in storage.
-
-Expected states:
-
-- `Pending` before reconciliation starts
-- `InProgress` while children are still pending or running
-- `Completed` when every child job is completed
-- `Failed` when every remaining child job is terminally failed and no child remains active
+- `Pending`: no child jobs exist yet.
+- `InProgress`: at least one child job is still pending or active.
+- `Completed`: every child job completed successfully.
+- `Failed`: every child job failed.
+- `CompletedWithErrors`: all child jobs finished, with a mix of success and failure.
 
 ### 3.4 Validation rules
 
-Campaign creation will fail if:
+Campaign creation fails when:
 
 - `spec.targets` is empty
-- a target is missing `targetAddress`
-- a target is missing `secretID`
+- any target is missing `targetAddress`
+- any target is missing `secretID`
 - both `spec.ociReference` and `spec.discovery` are set
 - neither `spec.ociReference` nor `spec.discovery` is set
+- `spec.ociReference` is set without `spec.component`
+- `spec.discovery.hardwareModel` or `spec.discovery.version` is omitted in component-discovery mode
 
-### 3.5 Local runtime requirements used during verification
+### 3.5 Verification environment
 
-The server requires a valid `MASTER_KEY` and an encrypted secrets file at startup. For the verified run, a temporary encrypted store was generated with `cmd/secret-cli`, then the server was started with:
+The verified run used:
 
-```bash
-MASTER_KEY=<64-char-hex> ./server serve --secrets-file <path-to-secrets.json>
-```
+- local Fabrica server on port `18093`
+- local OCI registry on port `5002`
+- local HTTPS Redfish mock on port `18443`
+- encrypted secret store generated with `cmd/secret-cli`
+- SQLite database at a temporary filesystem path
 
-The verification run also used a local SQLite database and a non-default test port because `18090` was already in use in the workspace.
+Docker was not required for the verified run because a local `registry` binary was available in the environment.

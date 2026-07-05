@@ -14,9 +14,9 @@ import (
 
 // DiscoverySpec defines OCI artifact discovery parameters.
 type DiscoverySpec struct {
-	Repository    string `json:"repository" yaml:"repository" validate:"required"`
-	HardwareModel string `json:"hardwareModel" yaml:"hardwareModel" validate:"required"`
-	Version       string `json:"version" yaml:"version" validate:"required"`
+	Repository    string `json:"repository" yaml:"repository"`
+	HardwareModel string `json:"hardwareModel" yaml:"hardwareModel"`
+	Version       string `json:"version" yaml:"version"`
 }
 
 // FirmwareUpdateJob represents a firmwareupdatejob resource
