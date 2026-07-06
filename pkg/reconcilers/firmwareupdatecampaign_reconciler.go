@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openchami/fabrica/pkg/events"
 	"github.com/openchami/fabrica/pkg/resource"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
@@ -67,6 +68,9 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 		job.Metadata.UID = uid
 		if err := r.Client.Create(ctx, job); err != nil {
 			return fmt.Errorf("create child FirmwareUpdateJob for child key %q: %w", desired.key, err)
+		}
+		if err := events.PublishResourceCreated(ctx, "FirmwareUpdateJob", job.Metadata.UID, job.Metadata.Name, job); err != nil {
+			r.Logger.Warnf("Failed to publish created event for child FirmwareUpdateJob %s: %v", job.Metadata.UID, err)
 		}
 		jobsByKey[desired.key] = job
 		createdAny = true
