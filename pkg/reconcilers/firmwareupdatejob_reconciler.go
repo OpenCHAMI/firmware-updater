@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/internal/smd"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 )
 
@@ -120,77 +122,171 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
-	// Discover the UpdateService action URI
-	actionURI, err := discoverUpdateServiceActionWithBackoff(ctx, res.Spec.TargetAddress, res.Spec.Username, res.Spec.Password)
-	if err != nil {
-		if isTerminalError(err) {
-			res.Status.JobState = "Failed"
-			res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
-			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-				return fmt.Errorf("set terminal failure after UpdateService discovery error: %w", updateErr)
-			}
-			return nil
-		}
+	// Branch on BMC selector. Exactly one of GroupRef / TargetAddress is set
+	// (enforced by Validate). Group mode fans out to the resolved member BMCs.
+	if strings.TrimSpace(res.Spec.GroupRef) != "" {
+		return r.reconcileGroup(ctx, res, proxyURI)
+	}
 
-		res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
+	// Single-BMC path (existing behavior): discover action + targets and dispatch.
+	taskID, err := r.dispatchToBMC(ctx, res, res.Spec.TargetAddress, res.Spec.Targets, proxyURI)
+	if err != nil {
 		res.Status.JobState = "Failed"
-		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-			return fmt.Errorf("persist exhausted UpdateService discovery transient error as failed: %w", updateErr)
-		}
-		return nil
-	}
-
-	r.Logger.Debugf("FirmwareUpdateJob %s discovered UpdateService action URI: %s", res.GetUID(), actionURI)
-
-	// If Component is specified and Targets is empty, discover targets from FirmwareInventory
-	if res.Spec.Component != "" && len(res.Spec.Targets) == 0 {
-		targets, err := discoverTargetsFromInventoryWithBackoff(ctx, res.Spec.TargetAddress, res.Spec.Username, res.Spec.Password, res.Spec.Component)
-		if err != nil {
-			if isTerminalError(err) {
-				res.Status.JobState = "Failed"
-				res.Status.ErrorDetail = err.Error()
-				if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-					return fmt.Errorf("set terminal failure after FirmwareInventory discovery error: %w", updateErr)
-				}
-				return nil
-			}
-
-			res.Status.ErrorDetail = err.Error()
-			res.Status.JobState = "Failed"
-			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-				return fmt.Errorf("persist exhausted FirmwareInventory discovery transient error as failed: %w", updateErr)
-			}
-			return nil
-		}
-
-		res.Spec.Targets = targets
-		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
-	}
-
-	taskID, err := dispatchRedfishWithBackoff(ctx, res, proxyURI, actionURI)
-	if err != nil {
-		if isTerminalError(err) {
-			res.Status.JobState = "Failed"
-			res.Status.ErrorDetail = err.Error()
-			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-				return fmt.Errorf("set terminal failure after Redfish dispatch error: %w", updateErr)
-			}
-			return nil
-		}
-
 		res.Status.ErrorDetail = err.Error()
-		res.Status.JobState = "Failed"
 		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-			return fmt.Errorf("persist exhausted Redfish transient error as failed: %w", updateErr)
+			if isTerminalError(err) {
+				return fmt.Errorf("set terminal failure after single-BMC dispatch error: %w", updateErr)
+			}
+			return fmt.Errorf("persist exhausted single-BMC transient error as failed: %w", updateErr)
 		}
 		return nil
 	}
 
 	res.Status.JobState = "InProgress"
 	res.Status.TaskID = taskID
+	res.Status.MemberCount = 1
+	res.Status.CompletedCount = 1
 	res.Status.ErrorDetail = ""
 
 	return nil
+}
+
+// dispatchToBMC runs UpdateService action discovery, optional component-based
+// target discovery, and the Redfish SimpleUpdate dispatch for a single BMC,
+// returning the resulting task ID. Returned errors preserve terminal/transient
+// classification (via *firmwareproxy.HTTPStatusError) for the caller.
+func (r *FirmwareUpdateJobReconciler) dispatchToBMC(ctx context.Context, res *v1.FirmwareUpdateJob, bmcAddress string, targets []string, proxyURI string) (string, error) {
+	actionURI, err := discoverUpdateServiceActionWithBackoff(ctx, bmcAddress, res.Spec.Username, res.Spec.Password)
+	if err != nil {
+		return "", fmt.Errorf("auto-discovery of UpdateService failed: %w", err)
+	}
+	r.Logger.Debugf("FirmwareUpdateJob %s discovered UpdateService action URI %s for BMC %s", res.GetUID(), actionURI, bmcAddress)
+
+	// If Component is specified and Targets is empty, discover targets from
+	// FirmwareInventory for this specific BMC.
+	if res.Spec.Component != "" && len(targets) == 0 {
+		discovered, err := discoverTargetsFromInventoryWithBackoff(ctx, bmcAddress, res.Spec.Username, res.Spec.Password, res.Spec.Component)
+		if err != nil {
+			return "", err
+		}
+		targets = discovered
+		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q on BMC %s: %v", res.GetUID(), res.Spec.Component, bmcAddress, targets)
+	}
+
+	taskID, err := dispatchRedfishWithBackoff(ctx, res, bmcAddress, targets, proxyURI, actionURI)
+	if err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+// reconcileGroup resolves an SMD group into member BMCs and fans out the
+// per-BMC dispatch with bounded parallelism. The OCI payload has already been
+// resolved once by the caller and is reused for every member via proxyURI.
+func (r *FirmwareUpdateJobReconciler) reconcileGroup(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI string) error {
+	resolver := smd.NewClientFromEnv()
+
+	resolution, err := resolveGroupTargetsWithBackoff(ctx, resolver, res.Spec.GroupRef)
+	if err != nil {
+		detail := fmt.Sprintf("group %q resolution failed: %v", res.Spec.GroupRef, err)
+		var httpErr *firmwareproxy.HTTPStatusError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			detail = fmt.Sprintf("group %q not found", res.Spec.GroupRef)
+		}
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = detail
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set failure after group resolution error: %w", updateErr)
+		}
+		return nil
+	}
+
+	res.Status.ResolutionDetail = resolution.Detail()
+	res.Status.MemberCount = len(resolution.Targets)
+
+	// Strict membership: unless AllowPartialTargets, any unresolvable member
+	// fails the job.
+	if len(resolution.Unresolvable) > 0 && !res.Spec.AllowPartialTargets {
+		res.Status.JobState = "Failed"
+		res.Status.FailedMembers = resolution.Unresolvable
+		res.Status.ErrorDetail = fmt.Sprintf("group %q has %d unresolvable member(s) and allowPartialTargets is false", res.Spec.GroupRef, len(resolution.Unresolvable))
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set failure after unresolvable members: %w", updateErr)
+		}
+		return nil
+	}
+
+	if len(resolution.Targets) == 0 {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = fmt.Sprintf("group %q returned no resolvable members", res.Spec.GroupRef)
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set failure after empty group resolution: %w", updateErr)
+		}
+		return nil
+	}
+
+	if len(resolution.Unresolvable) > 0 {
+		r.Logger.Warnf("FirmwareUpdateJob %s proceeding with %d resolvable member(s); %d unresolvable: %v",
+			res.GetUID(), len(resolution.Targets), len(resolution.Unresolvable), resolution.Unresolvable)
+	}
+
+	maxParallel := res.Spec.MaxParallel
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+
+	result := fanOutDispatch(ctx, resolution.Targets, maxParallel, func(ctx context.Context, m memberTarget) error {
+		taskID, derr := r.dispatchToBMC(ctx, res, m.BMCFQDN, res.Spec.Targets, proxyURI)
+		if derr != nil {
+			r.Logger.Errorf("FirmwareUpdateJob %s member %s (%s) dispatch failed: %v", res.GetUID(), m.Xname, m.BMCFQDN, derr)
+			return derr
+		}
+		r.Logger.Debugf("FirmwareUpdateJob %s member %s (%s) dispatched task %s", res.GetUID(), m.Xname, m.BMCFQDN, taskID)
+		return nil
+	})
+
+	res.Status.CompletedCount = result.Completed
+	res.Status.FailedMembers = result.Failed
+
+	// All-members-must-succeed aggregation rule.
+	if len(result.Failed) > 0 {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = fmt.Sprintf("%d of %d member BMC(s) failed to dispatch: %v", len(result.Failed), len(resolution.Targets), result.FirstErr)
+		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set failure after fan-out: %w", updateErr)
+		}
+		return nil
+	}
+
+	res.Status.JobState = "InProgress"
+	res.Status.ErrorDetail = ""
+	return nil
+}
+
+// resolveGroupTargetsWithBackoff wraps resolveGroupTargets with the same
+// exponential-backoff retry used elsewhere, retrying only transient errors.
+func resolveGroupTargetsWithBackoff(ctx context.Context, resolver smdResolver, groupRef string) (groupResolution, error) {
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		resolution, err := resolveGroupTargets(ctx, resolver, groupRef)
+		if err == nil {
+			return resolution, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return groupResolution{}, waitErr
+		}
+		backoff *= 2
+	}
+
+	return groupResolution{}, lastErr
 }
 
 func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string, error) {
@@ -289,12 +385,12 @@ func discoverTargetsFromInventoryWithBackoff(ctx context.Context, targetAddress,
 	return nil, lastErr
 }
 
-func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI, actionURI string) (string, error) {
+func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, bmcAddress string, targets []string, proxyURI, actionURI string) (string, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		taskID, err := dispatchRedfishOnce(ctx, res, proxyURI, actionURI)
+		taskID, err := dispatchRedfishOnce(ctx, res, bmcAddress, targets, proxyURI, actionURI)
 		if err == nil {
 			return taskID, nil
 		}
@@ -313,10 +409,10 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 	return "", lastErr
 }
 
-func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyURI, actionURI string) (string, error) {
+func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, bmcAddress string, targets []string, proxyURI, actionURI string) (string, error) {
 	payload := map[string]interface{}{
 		"ImageURI":         proxyURI,
-		"Targets":          res.Spec.Targets,
+		"Targets":          targets,
 		"TransferProtocol": "HTTP",
 	}
 	body, err := json.Marshal(payload)
@@ -327,7 +423,7 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, proxyUR
 	// Construct the full endpoint URL if actionURI is a relative path
 	endpoint := actionURI
 	if !strings.HasPrefix(endpoint, "http") {
-		endpoint = fmt.Sprintf("https://%s%s", strings.TrimSpace(res.Spec.TargetAddress), actionURI)
+		endpoint = fmt.Sprintf("https://%s%s", strings.TrimSpace(bmcAddress), actionURI)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
@@ -388,8 +484,8 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 func isTerminalError(err error) bool {
-	statusErr, ok := err.(*firmwareproxy.HTTPStatusError)
-	if !ok {
+	var statusErr *firmwareproxy.HTTPStatusError
+	if !errors.As(err, &statusErr) {
 		return false
 	}
 

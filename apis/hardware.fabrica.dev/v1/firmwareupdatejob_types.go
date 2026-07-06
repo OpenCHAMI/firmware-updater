@@ -30,14 +30,28 @@ type FirmwareUpdateJob struct {
 
 // FirmwareUpdateJobSpec defines the desired state of FirmwareUpdateJob
 type FirmwareUpdateJobSpec struct {
-	TargetAddress      string         `json:"targetAddress" validate:"required"`
-	Username           string         `json:"username" validate:"required"`
-	Password           string         `json:"password" validate:"required"`
-	OCIReference       *string        `json:"ociReference,omitempty"`
-	Discovery          *DiscoverySpec `json:"discovery,omitempty"`
-	Targets            []string       `json:"targets,omitempty" validate:"dive,required"`
-	Component          string         `json:"component,omitempty"`
-	ServerProxyAddress string         `json:"serverProxyAddress" validate:"required"`
+	// TargetAddress selects a single BMC. It is mutually exclusive with GroupRef
+	// (exactly one must be set; enforced in Validate). It is no longer marked
+	// required at the struct-tag level so that group mode can omit it.
+	TargetAddress string `json:"targetAddress,omitempty"`
+	// GroupRef selects the set of BMCs via an SMD user-defined group label.
+	// Mutually exclusive with TargetAddress.
+	GroupRef string `json:"groupRef,omitempty"`
+	// MaxParallel bounds the number of member BMCs updated concurrently in group
+	// mode. Only meaningful when GroupRef is set. If omitted it defaults to 1
+	// (serial) at reconcile time. Must be >= 1 when provided.
+	MaxParallel int `json:"maxParallel,omitempty"`
+	// AllowPartialTargets controls group resolution strictness. When false
+	// (default), any unresolvable member fails the job. When true, unresolvable
+	// members are recorded and the job proceeds with the resolvable members.
+	AllowPartialTargets bool           `json:"allowPartialTargets,omitempty"`
+	Username            string         `json:"username" validate:"required"`
+	Password            string         `json:"password" validate:"required"`
+	OCIReference        *string        `json:"ociReference,omitempty"`
+	Discovery           *DiscoverySpec `json:"discovery,omitempty"`
+	Targets             []string       `json:"targets,omitempty" validate:"dive,required"`
+	Component           string         `json:"component,omitempty"`
+	ServerProxyAddress  string         `json:"serverProxyAddress" validate:"required"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
@@ -47,6 +61,17 @@ type FirmwareUpdateJobStatus struct {
 	ErrorDetail     string `json:"errorDetail,omitempty"`
 	ResolvedVersion string `json:"resolvedVersion,omitempty"`
 	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
+	// ResolutionDetail captures group member resolution details for debugging
+	// (e.g. "resolved 5 of 5 members").
+	ResolutionDetail string `json:"resolutionDetail,omitempty"`
+	// MemberCount is the number of member BMCs selected (1 in single-TargetAddress
+	// mode, N in group mode after de-duplication).
+	MemberCount int `json:"memberCount,omitempty"`
+	// CompletedCount is the number of member BMCs successfully dispatched in a
+	// fan-out job.
+	CompletedCount int `json:"completedCount,omitempty"`
+	// FailedMembers lists member BMC addresses that failed during fan-out.
+	FailedMembers []string `json:"failedMembers,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateJob
@@ -74,7 +99,21 @@ func (r *FirmwareUpdateJob) Validate(ctx context.Context) error {
 		return fmt.Errorf("exactly one of spec.ociReference or spec.discovery must be provided")
 	}
 
-	// Either Targets or Component must be provided
+	// BMC selector exclusivity: exactly one of TargetAddress or GroupRef.
+	hasTargetAddress := strings.TrimSpace(r.Spec.TargetAddress) != ""
+	hasGroupRef := strings.TrimSpace(r.Spec.GroupRef) != ""
+	if hasTargetAddress == hasGroupRef {
+		return fmt.Errorf("exactly one of spec.targetAddress or spec.groupRef must be provided")
+	}
+
+	// MaxParallel, when provided, must be >= 1. It is only meaningful in group
+	// mode. Zero is the unset value (omitempty) and defaults to serial at
+	// reconcile time; negative values are rejected.
+	if r.Spec.MaxParallel < 0 {
+		return fmt.Errorf("spec.maxParallel must be >= 1 when provided")
+	}
+
+	// Either Targets or Component must be provided (applies to every resolved member).
 	if len(r.Spec.Targets) == 0 && r.Spec.Component == "" {
 		return fmt.Errorf("spec.targets or spec.component must be provided")
 	}
