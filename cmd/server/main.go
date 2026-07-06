@@ -205,8 +205,19 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Initialize storage backend
 
+	// Ensure SQLite uses WAL journal mode and a busy timeout so that concurrent
+	// reconciler goroutines don't immediately fail with "table is locked".
+	dbURL := config.DatabaseURL
+	if !strings.Contains(dbURL, "_journal_mode") {
+		if strings.Contains(dbURL, "?") {
+			dbURL += "&_journal_mode=WAL&_busy_timeout=5000"
+		} else {
+			dbURL += "?_journal_mode=WAL&_busy_timeout=5000"
+		}
+	}
+
 	// Connect to database
-	client, err := ent.Open("sqlite3", config.DatabaseURL)
+	client, err := ent.Open("sqlite3", dbURL)
 	if err != nil {
 		return fmt.Errorf("failed opening connection to sqlite3: %w", err)
 	}
