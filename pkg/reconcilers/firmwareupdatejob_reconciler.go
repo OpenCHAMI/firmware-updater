@@ -265,7 +265,7 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		}
 	}
 
-	updated, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, res, creds)
+	verification, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, res, creds)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -276,7 +276,16 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		return err
 	}
 
-	if updated {
+	if verification.Failed {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = verification.Detail
+		if res.Status.ErrorDetail == "" {
+			res.Status.ErrorDetail = "Redfish inventory reported failure"
+		}
+		return nil
+	}
+
+	if verification.Updated {
 		res.Status.JobState = "Completed"
 		res.Status.ErrorDetail = ""
 	}
@@ -543,18 +552,24 @@ func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password,
 	}
 }
 
-func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (bool, error) {
+type redfishInventoryVerification struct {
+	Updated bool
+	Failed  bool
+	Detail  string
+}
+
+func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
 	if strings.TrimSpace(res.Status.ResolvedVersion) == "" {
-		return false, nil
+		return redfishInventoryVerification{}, nil
 	}
 
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		updated, err := verifyFirmwareTargetsUpdatedOnce(ctx, res, creds)
+		verification, err := verifyFirmwareTargetsUpdatedOnce(ctx, res, creds)
 		if err == nil {
-			return updated, nil
+			return verification, nil
 		}
 
 		lastErr = err
@@ -563,42 +578,77 @@ func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.Firmwa
 		}
 
 		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
-			return false, waitErr
+			return redfishInventoryVerification{}, waitErr
 		}
 		backoff *= 2
 	}
 
-	return false, lastErr
+	return redfishInventoryVerification{}, lastErr
 }
 
-func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (bool, error) {
+func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
 	targets := append([]string(nil), res.Spec.Targets...)
 	if len(targets) == 0 && strings.TrimSpace(res.Spec.Component) != "" {
 		resolvedTargets, err := discoverTargetsFromInventory(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, res.Spec.Component)
 		if err != nil {
-			return false, err
+			return redfishInventoryVerification{}, err
 		}
 		targets = resolvedTargets
 	}
 
 	if len(targets) == 0 {
-		return false, nil
+		return redfishInventoryVerification{}, nil
 	}
 
 	resolvedVersion := strings.ToLower(strings.TrimSpace(res.Status.ResolvedVersion))
 	for _, target := range targets {
 		body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
 		if err != nil {
-			return false, err
+			return redfishInventoryVerification{}, err
 		}
 
 		installedVersion := strings.ToLower(strings.TrimSpace(asString(body["Version"])))
 		if installedVersion == "" || !strings.Contains(installedVersion, resolvedVersion) {
-			return false, nil
+			if failed, detail := redfishInventoryFailure(body); failed {
+				return redfishInventoryVerification{Failed: true, Detail: detail}, nil
+			}
+			return redfishInventoryVerification{}, nil
 		}
 	}
 
-	return true, nil
+	return redfishInventoryVerification{Updated: true}, nil
+}
+
+func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
+	statusMap, ok := body["Status"].(map[string]interface{})
+	if !ok {
+		return false, ""
+	}
+
+	health := strings.ToLower(strings.TrimSpace(asString(statusMap["Health"])))
+	if conditions, ok := statusMap["Conditions"].([]interface{}); ok {
+		for _, raw := range conditions {
+			condition, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			severity := strings.ToLower(strings.TrimSpace(asString(condition["Severity"])))
+			if severity == "warning" || severity == "critical" || health == "warning" || health == "critical" {
+				for _, key := range []string{"Message", "MessageId", "Resolution"} {
+					if detail := strings.TrimSpace(asString(condition[key])); detail != "" {
+						return true, detail
+					}
+				}
+				return true, fmt.Sprintf("Redfish inventory reported %s condition", severity)
+			}
+		}
+	}
+
+	if health == "warning" || health == "critical" {
+		return true, fmt.Sprintf("Redfish inventory health is %s", health)
+	}
+
+	return false, ""
 }
 
 func getRedfishJSON(ctx context.Context, targetAddress, username, password, uri string) (map[string]interface{}, int, error) {

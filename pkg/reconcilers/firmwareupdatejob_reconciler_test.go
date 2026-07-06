@@ -128,6 +128,52 @@ func TestReconcileFirmwareUpdateJobFallsBackToInventoryWhenTaskMissing(t *testin
 	}
 }
 
+func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
+	ensureTestSecretStore(t)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		if r.URL.Path != "/redfish/v1/UpdateService/FirmwareInventory/BMC" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		respondTestJSON(t, w, map[string]interface{}{
+			"Version": "nc.1.10.3-build1",
+			"Status": map[string]interface{}{
+				"Health": "Warning",
+				"Conditions": []map[string]interface{}{{
+					"Message":  "Required 'version' file was missing from firmware archive.",
+					"Severity": "Warning",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	job := v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			SecretID:      "test-secret",
+			Targets:       []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			JobState:        "InProgress",
+			ResolvedVersion: "1.10.2",
+		},
+	}
+
+	reconciler := &FirmwareUpdateJobReconciler{}
+	if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
+		t.Fatalf("reconcileFirmwareUpdateJob returned error: %v", err)
+	}
+
+	if job.Status.JobState != "Failed" {
+		t.Fatalf("expected Failed, got %q", job.Status.JobState)
+	}
+	if !strings.Contains(job.Status.ErrorDetail, "missing from firmware archive") {
+		t.Fatalf("expected inventory failure detail, got %q", job.Status.ErrorDetail)
+	}
+}
+
 func ensureTestSecretStore(t *testing.T) {
 	t.Helper()
 	installTestSecretStore.Do(func() {
