@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/OpenCHAMI/magellan/pkg/secrets"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -216,11 +218,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Connect to database
-	client, err := ent.Open("sqlite3", dbURL)
+	// Connect to database. SQLite permits only one writer at a time, so keep
+	// the pool serialized and rely on busy_timeout for short write contention.
+	sqlDB, err := sql.Open("sqlite3", dbURL)
 	if err != nil {
 		return fmt.Errorf("failed opening connection to sqlite3: %w", err)
 	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	client := ent.NewClient(ent.Driver(entsql.OpenDB("sqlite3", sqlDB)))
 	defer client.Close()
 
 	// Run auto-migration
