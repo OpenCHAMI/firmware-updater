@@ -455,10 +455,14 @@ func classifyORASError(err error) error {
 	}
 
 	msg := strings.ToLower(err.Error())
+
+	if strings.Contains(msg, "status code 404") {
+		return &HTTPStatusError{StatusCode: 404, Message: err.Error()}
+	}
+
 	if strings.Contains(msg, "status code 400") ||
 		strings.Contains(msg, "status code 401") ||
 		strings.Contains(msg, "status code 403") ||
-		strings.Contains(msg, "status code 404") ||
 		strings.Contains(msg, "status code 405") ||
 		strings.Contains(msg, "status code 409") {
 		return &HTTPStatusError{StatusCode: 400, Message: err.Error()}
