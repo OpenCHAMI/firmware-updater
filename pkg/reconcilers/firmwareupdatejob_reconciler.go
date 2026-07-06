@@ -64,9 +64,13 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		res.Status.JobState = "Pending"
 	}
 
-	if res.Status.JobState == "InProgress" || res.Status.JobState == "Completed" || res.Status.JobState == "Failed" {
+	if res.Status.JobState == "Completed" || res.Status.JobState == "Failed" {
 		r.Logger.Infof("FirmwareUpdateJob %s already terminal or active in state %q; skipping", res.GetUID(), res.Status.JobState)
 		return nil
+	}
+
+	if res.Status.JobState == "InProgress" {
+		return r.observeInProgressFirmwareUpdateJob(ctx, res)
 	}
 
 	res.Status.JobState = "Resolving"
@@ -218,6 +222,68 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	return nil
 }
 
+func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx context.Context, res *v1.FirmwareUpdateJob) error {
+	creds, err := loadBMCCredentials(res.Spec.SecretID)
+	if err != nil {
+		if isTerminalError(err) {
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = err.Error()
+			return nil
+		}
+
+		return err
+	}
+
+	if taskID := strings.TrimSpace(res.Status.TaskID); taskID != "" {
+		observation, err := pollRedfishTaskWithBackoff(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, taskID)
+		if err != nil {
+			if isTerminalError(err) {
+				res.Status.JobState = "Failed"
+				res.Status.ErrorDetail = fmt.Sprintf("poll Redfish task failed: %v", err)
+				return nil
+			}
+
+			return err
+		}
+
+		switch observation.State {
+		case redfishTaskStateCompleted:
+			res.Status.JobState = "Completed"
+			res.Status.ErrorDetail = ""
+			return nil
+		case redfishTaskStateFailed:
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = observation.Detail
+			if res.Status.ErrorDetail == "" {
+				res.Status.ErrorDetail = "Redfish task reported failure"
+			}
+			return nil
+		case redfishTaskStateRunning:
+			return nil
+		case redfishTaskStateMissing:
+			// Some BMCs delete finished task resources quickly. Fall back to inventory verification.
+		}
+	}
+
+	updated, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, res, creds)
+	if err != nil {
+		if isTerminalError(err) {
+			res.Status.JobState = "Failed"
+			res.Status.ErrorDetail = fmt.Sprintf("verify firmware inventory failed: %v", err)
+			return nil
+		}
+
+		return err
+	}
+
+	if updated {
+		res.Status.JobState = "Completed"
+		res.Status.ErrorDetail = ""
+	}
+
+	return nil
+}
+
 func resolvePayloadWithBackoff(ctx context.Context, ociReference string) (string, error) {
 	var lastErr error
 	backoff := time.Second
@@ -350,10 +416,7 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds b
 	}
 
 	// Construct the full endpoint URL if actionURI is a relative path
-	endpoint := actionURI
-	if !strings.HasPrefix(endpoint, "http") {
-		endpoint = fmt.Sprintf("https://%s%s", strings.TrimSpace(res.Spec.TargetAddress), actionURI)
-	}
+	endpoint := resolveRedfishEndpoint(res.Spec.TargetAddress, actionURI)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
@@ -398,6 +461,231 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds b
 	}
 
 	return taskID, nil
+}
+
+type redfishTaskState string
+
+const (
+	redfishTaskStateRunning   redfishTaskState = "running"
+	redfishTaskStateCompleted redfishTaskState = "completed"
+	redfishTaskStateFailed    redfishTaskState = "failed"
+	redfishTaskStateMissing   redfishTaskState = "missing"
+)
+
+type redfishTaskObservation struct {
+	State  redfishTaskState
+	Detail string
+}
+
+func pollRedfishTaskWithBackoff(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		observation, err := pollRedfishTaskOnce(ctx, targetAddress, username, password, taskID)
+		if err == nil {
+			return observation, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return redfishTaskObservation{}, waitErr
+		}
+		backoff *= 2
+	}
+
+	return redfishTaskObservation{}, lastErr
+}
+
+func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
+	body, statusCode, err := getRedfishJSON(ctx, targetAddress, username, password, taskID)
+	if err != nil {
+		statusErr, ok := err.(*firmwareproxy.HTTPStatusError)
+		if ok && statusErr.StatusCode == http.StatusNotFound {
+			return redfishTaskObservation{State: redfishTaskStateMissing}, nil
+		}
+		return redfishTaskObservation{}, err
+	}
+
+	if statusCode == http.StatusAccepted {
+		return redfishTaskObservation{State: redfishTaskStateRunning}, nil
+	}
+
+	taskState := strings.ToLower(strings.TrimSpace(asString(body["TaskState"])))
+	taskStatus := strings.ToLower(strings.TrimSpace(asString(body["TaskStatus"])))
+	detail := redfishTaskDetail(body)
+
+	switch taskState {
+	case "completed":
+		if taskStatus == "critical" || taskStatus == "warning" {
+			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		return redfishTaskObservation{State: redfishTaskStateCompleted, Detail: detail}, nil
+	case "exception", "killed", "cancelled", "canceled", "interrupted":
+		return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+	case "", "new", "pending", "starting", "running", "suspended", "stopping", "service", "canceling":
+		if taskStatus == "critical" {
+			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
+	default:
+		if taskStatus == "ok" {
+			return redfishTaskObservation{State: redfishTaskStateCompleted, Detail: detail}, nil
+		}
+		if taskStatus == "critical" || taskStatus == "warning" {
+			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
+	}
+}
+
+func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (bool, error) {
+	if strings.TrimSpace(res.Status.ResolvedVersion) == "" {
+		return false, nil
+	}
+
+	var lastErr error
+	backoff := time.Second
+
+	for attempt := 1; attempt <= 4; attempt++ {
+		updated, err := verifyFirmwareTargetsUpdatedOnce(ctx, res, creds)
+		if err == nil {
+			return updated, nil
+		}
+
+		lastErr = err
+		if isTerminalError(err) || attempt == 4 {
+			break
+		}
+
+		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+			return false, waitErr
+		}
+		backoff *= 2
+	}
+
+	return false, lastErr
+}
+
+func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (bool, error) {
+	targets := append([]string(nil), res.Spec.Targets...)
+	if len(targets) == 0 && strings.TrimSpace(res.Spec.Component) != "" {
+		resolvedTargets, err := discoverTargetsFromInventory(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, res.Spec.Component)
+		if err != nil {
+			return false, err
+		}
+		targets = resolvedTargets
+	}
+
+	if len(targets) == 0 {
+		return false, nil
+	}
+
+	resolvedVersion := strings.ToLower(strings.TrimSpace(res.Status.ResolvedVersion))
+	for _, target := range targets {
+		body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
+		if err != nil {
+			return false, err
+		}
+
+		installedVersion := strings.ToLower(strings.TrimSpace(asString(body["Version"])))
+		if installedVersion == "" || !strings.Contains(installedVersion, resolvedVersion) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+func getRedfishJSON(ctx context.Context, targetAddress, username, password, uri string) (map[string]interface{}, int, error) {
+	endpoint := resolveRedfishEndpoint(targetAddress, uri)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("build Redfish GET request: %w", err)
+	}
+	req.SetBasicAuth(username, password)
+
+	resp, err := newRedfishHTTPClient().Do(req)
+	if err != nil {
+		if isLikelyTransientNetworkError(err) {
+			return nil, 0, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
+		}
+		return nil, 0, fmt.Errorf("Redfish GET failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
+		return nil, resp.StatusCode, &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
+		return nil, resp.StatusCode, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
+	}
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("parse Redfish response: %w", err)
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+func newRedfishHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
+func resolveRedfishEndpoint(targetAddress, uri string) string {
+	uri = strings.TrimSpace(uri)
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		return uri
+	}
+	if strings.HasPrefix(uri, "/") {
+		return fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), uri)
+	}
+	return fmt.Sprintf("https://%s/%s", strings.TrimSpace(targetAddress), uri)
+}
+
+func redfishTaskDetail(body map[string]interface{}) string {
+	if message, ok := body["Message"].(string); ok && strings.TrimSpace(message) != "" {
+		return strings.TrimSpace(message)
+	}
+
+	if messages, ok := body["Messages"].([]interface{}); ok {
+		for _, raw := range messages {
+			messageMap, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for _, key := range []string{"Message", "MessageId", "Resolution"} {
+				if value := strings.TrimSpace(asString(messageMap[key])); value != "" {
+					return value
+				}
+			}
+		}
+	}
+
+	return strings.TrimSpace(asString(body["TaskStatus"]))
+}
+
+func asString(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
