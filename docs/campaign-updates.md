@@ -23,6 +23,28 @@ To ensure the controller selects the correct binary for a specific piece of hard
 * **Version Annotation:** `org.opencontainers.image.version` (Must be a valid semantic version for comparison, e.g., `1.2.0`)
 * **Compatibility Annotation:** `dev.fabrica.hardware.compatible` (A comma-separated list of strings that exactly match the expected Redfish Model, SKU, or PartNumber).
 
+### How Universal Discovery Maps Hardware to Repositories
+
+When using a `FirmwareUpdateCampaign` in Universal Discovery mode (where the `component` field is intentionally omitted), the reconciliation engine dynamically determines where to look for firmware updates based on the target hardware's Redfish inventory.
+
+**The Mapping Process**
+
+1. **Inventory Polling:** The system connects to the target's Redfish API (`/redfish/v1/UpdateService/FirmwareInventory`) and retrieves the list of all installed components.
+2. **Identifier Extraction:** For each component, the system extracts the primary identifier. It prioritizes the `Id` field, followed by the `Name` field, and finally the URI string itself (e.g., `BMC`, `Node0.BIOS`, or `FPGA0`).
+3. **Sanitization:** The engine normalizes this identifier to generate a valid OCI repository slug. It converts the string to lowercase and replaces any non-alphanumeric characters (such as periods or spaces) with hyphens. It also generates a secondary compact slug by removing the hyphens entirely.
+* `BMC` becomes `bmc`
+* `Node0.BIOS` becomes `node0-bios` (and `node0bios`)
+* `FPGA0` becomes `fpga0`
+
+
+4. **Path Construction:** The system appends these sanitized slugs to the base repository specified in the campaign's `discovery.repository` field. If the base configuration is `registry.example.com/firmware`, the engine automatically constructs and queries search paths like `registry.example.com/firmware/bmc` and `registry.example.com/firmware/node0-bios`.
+
+**Controlling Component Updates via Registry Structure**
+This dynamic path generation allows administrators to explicitly control which hardware components are eligible for automated updates without modifying the Kubernetes YAML payloads.
+
+* **Opt-In by Path Creation:** To enable updates for a specific hardware component type, create an OCI repository that exactly matches its sanitized Redfish identifier (e.g., `/firmware/node0-bios`) and push the annotated firmware bundles to that path.
+* **Opt-Out by Omission:** To exclude a component from automated updates, ensure no corresponding repository exists in the registry. When the reconciler calculates a search path like `/firmware/fpga0` and receives an HTTP 404 response from the OCI registry, it safely ignores that component and proceeds with evaluating the rest of the hardware inventory.
+
 ### Command Examples: Pushing Vendor-Specific Firmware
 
 The following `oras push` commands demonstrate how to store both HPE and Dell BMC firmware in the exact same OCI repository (`/firmware/bmc`) while ensuring they are perfectly isolated by hardware model.
