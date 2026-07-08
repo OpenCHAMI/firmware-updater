@@ -119,7 +119,7 @@ Once submitted, the microservice processes the campaign. For every target where 
 You can monitor the aggregate progress of the campaign, which provides concrete counts of the underlying jobs, by querying the specific campaign by name:
 
 ```bash
-curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/fleet-wide-bmc-update
+curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/
 
 ```
 
