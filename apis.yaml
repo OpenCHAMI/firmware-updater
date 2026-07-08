@@ -5,3 +5,4 @@ groups:
         - v1
       resources:
         - FirmwareUpdateJob
+        - FirmwareUpdateCampaign

@@ -161,6 +161,37 @@ func importFile(ctx context.Context, path string, mode string, dryRun bool) (imp
 
 	// Import based on kind
 	switch genericResource.Kind {
+	case "FirmwareUpdateCampaign":
+		var res *v1.FirmwareUpdateCampaign
+		if ext == ".json" {
+			if err := json.Unmarshal(data, &res); err != nil {
+				return 0, 0, fmt.Errorf("failed to unmarshal FirmwareUpdateCampaign: %w", err)
+			}
+		} else {
+			if err := yaml.Unmarshal(data, &res); err != nil {
+				return 0, 0, fmt.Errorf("failed to unmarshal FirmwareUpdateCampaign: %w", err)
+			}
+		}
+
+		// Check if resource exists
+		existing, err := storage.GetFirmwareUpdateCampaignByUID(ctx, res.Metadata.UID)
+		if err == nil && existing != nil {
+			// Resource exists
+			if mode == "skip" {
+				fmt.Printf("  ⊘ %s (exists)\n", filepath.Base(path))
+				return 0, 1, nil
+			}
+			fmt.Printf("  ⟳ %s (updating)\n", filepath.Base(path))
+		} else {
+			fmt.Printf("  ✓ %s (creating)\n", filepath.Base(path))
+		}
+
+		if !dryRun {
+			if err := storage.SaveFirmwareUpdateCampaign(ctx, res); err != nil {
+				return 0, 0, fmt.Errorf("failed to save FirmwareUpdateCampaign: %w", err)
+			}
+		}
+		return 1, 0, nil
 	case "FirmwareUpdateJob":
 		var res *v1.FirmwareUpdateJob
 		if ext == ".json" {
@@ -198,6 +229,16 @@ func importFile(ctx context.Context, path string, mode string, dryRun bool) (imp
 }
 
 func deleteAllResources(ctx context.Context) error {
+	// Delete all firmwareupdatecampaigns
+	firmwareupdatecampaignItems, err := storage.Queryfirmwareupdatecampaigns(ctx).All(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to query firmwareupdatecampaigns: %w", err)
+	}
+	for _, item := range firmwareupdatecampaignItems {
+		if err := storage.DeleteFirmwareUpdateCampaign(ctx, item.UID); err != nil {
+			return fmt.Errorf("failed to delete FirmwareUpdateCampaign: %w", err)
+		}
+	}
 	// Delete all firmwareupdatejobs
 	firmwareupdatejobItems, err := storage.Queryfirmwareupdatejobs(ctx).All(ctx)
 	if err != nil {

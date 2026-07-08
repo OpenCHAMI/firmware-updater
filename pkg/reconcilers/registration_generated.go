@@ -31,6 +31,11 @@ import (
 //	}
 //	controller.Start(ctx)
 func RegisterReconcilers(controller *reconcile.Controller, client reconcile.ClientInterface, eventBus events.EventBus) error {
+	// Register FirmwareUpdateCampaign reconciler
+	firmwareupdatecampaignsReconciler := NewDefaultFirmwareUpdateCampaignReconciler(client, eventBus)
+	if err := controller.RegisterReconciler(firmwareupdatecampaignsReconciler); err != nil {
+		return err
+	}
 	// Register FirmwareUpdateJob reconciler
 	firmwareupdatejobsReconciler := NewDefaultFirmwareUpdateJobReconciler(client, eventBus)
 	if err := controller.RegisterReconciler(firmwareupdatejobsReconciler); err != nil {
@@ -45,6 +50,7 @@ func RegisterReconcilers(controller *reconcile.Controller, client reconcile.Clie
 // This is useful for monitoring and debugging.
 func GetRegisteredReconcilers() []string {
 	return []string{
+		"FirmwareUpdateCampaign",
 		"FirmwareUpdateJob",
 	}
 }

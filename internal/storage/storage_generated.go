@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openchami/fabrica/pkg/reconcile"
@@ -33,6 +34,150 @@ var entClient *ent.Client
 // SetEntClient sets the Ent client for storage operations
 func SetEntClient(client *ent.Client) {
 	entClient = client
+}
+
+// LoadAllFirmwareUpdateCampaigns loads all FirmwareUpdateCampaign resources from Ent storage
+func LoadAllFirmwareUpdateCampaigns(ctx context.Context) ([]*v1.FirmwareUpdateCampaign, error) {
+	if entClient == nil {
+		return nil, fmt.Errorf("ent client not initialized")
+	}
+
+	// Query all resources of this kind
+	entResources, err := entClient.Resource.Query().
+		Where(entresource.KindEQ("FirmwareUpdateCampaign")).
+		WithLabels().
+		WithAnnotations().
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load FirmwareUpdateCampaign resources: %w", err)
+	}
+
+	// Convert to Fabrica resources
+	var resources []*v1.FirmwareUpdateCampaign
+	for _, entResource := range entResources {
+		fabricaResource, err := FromEntResource(ctx, entResource)
+		if err != nil {
+			// Log error but continue with other resources
+			continue
+		}
+		resources = append(resources, fabricaResource.(*v1.FirmwareUpdateCampaign))
+	}
+
+	return resources, nil
+}
+
+// LoadFirmwareUpdateCampaign loads a single FirmwareUpdateCampaign resource by UID from Ent storage
+func LoadFirmwareUpdateCampaign(ctx context.Context, uid string) (*v1.FirmwareUpdateCampaign, error) {
+	if entClient == nil {
+		return nil, fmt.Errorf("ent client not initialized")
+	}
+
+	// Query by UID and kind
+	entResource, err := entClient.Resource.Query().
+		Where(
+			entresource.UIDEQ(uid),
+			entresource.KindEQ("FirmwareUpdateCampaign"),
+		).
+		WithLabels().
+		WithAnnotations().
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to load FirmwareUpdateCampaign %s: %w", uid, err)
+	}
+
+	// Convert to Fabrica resource
+	fabricaResource, err := FromEntResource(ctx, entResource)
+	if err != nil {
+		return nil, err
+	}
+
+	return fabricaResource.(*v1.FirmwareUpdateCampaign), nil
+}
+
+// SaveFirmwareUpdateCampaign saves a FirmwareUpdateCampaign resource to Ent storage
+func SaveFirmwareUpdateCampaign(ctx context.Context, resource *v1.FirmwareUpdateCampaign) error {
+	if entClient == nil {
+		return fmt.Errorf("ent client not initialized")
+	}
+
+	return withSQLiteWriteRetry(ctx, func() error {
+		// Convert to Ent entity
+		createBuilder, labels, annotations, err := ToEntResource(resource)
+		if err != nil {
+			return fmt.Errorf("failed to convert FirmwareUpdateCampaign to ent: %w", err)
+		}
+
+		// Use upsert pattern: try to update, if not exists then create
+		entResource, err := entClient.Resource.Query().
+			Where(entresource.UIDEQ(resource.GetUID())).
+			Only(ctx)
+
+		if err != nil && !ent.IsNotFound(err) {
+			return fmt.Errorf("failed to check FirmwareUpdateCampaign existence: %w", err)
+		}
+
+		var savedResource *ent.Resource
+		if ent.IsNotFound(err) {
+			// Create new resource
+			savedResource, err = createBuilder.Save(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to create FirmwareUpdateCampaign: %w", err)
+			}
+		} else {
+			// Update existing resource
+			spec, _ := json.Marshal(resource.Spec)
+			status, _ := json.Marshal(resource.Status)
+
+			savedResource, err = entClient.Resource.UpdateOne(entResource).
+				SetName(resource.Metadata.Name).
+				SetAPIVersion(resource.APIVersion).
+				SetSpec(spec).
+				SetStatus(status).
+				SetUpdatedAt(time.Now()).
+				Save(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to update FirmwareUpdateCampaign: %w", err)
+			}
+		}
+
+		if err := saveLabels(ctx, savedResource.ID, labels); err != nil {
+			return err
+		}
+
+		if err := saveAnnotations(ctx, savedResource.ID, annotations); err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+// DeleteFirmwareUpdateCampaign deletes a FirmwareUpdateCampaign resource from Ent storage
+func DeleteFirmwareUpdateCampaign(ctx context.Context, uid string) error {
+	if entClient == nil {
+		return fmt.Errorf("ent client not initialized")
+	}
+
+	// Delete by UID
+	deleted, err := entClient.Resource.Delete().
+		Where(
+			entresource.UIDEQ(uid),
+			entresource.KindEQ("FirmwareUpdateCampaign"),
+		).
+		Exec(ctx)
+
+	if err != nil {
+		return fmt.Errorf("failed to delete FirmwareUpdateCampaign %s: %w", uid, err)
+	}
+
+	if deleted == 0 {
+		return ErrNotFound
+	}
+
+	return nil
 }
 
 // LoadAllFirmwareUpdateJobs loads all FirmwareUpdateJob resources from Ent storage
@@ -102,56 +247,97 @@ func SaveFirmwareUpdateJob(ctx context.Context, resource *v1.FirmwareUpdateJob) 
 		return fmt.Errorf("ent client not initialized")
 	}
 
-	// Convert to Ent entity
-	createBuilder, labels, annotations, err := ToEntResource(resource)
-	if err != nil {
-		return fmt.Errorf("failed to convert FirmwareUpdateJob to ent: %w", err)
-	}
-
-	// Use upsert pattern: try to update, if not exists then create
-	entResource, err := entClient.Resource.Query().
-		Where(entresource.UIDEQ(resource.GetUID())).
-		Only(ctx)
-
-	if err != nil && !ent.IsNotFound(err) {
-		return fmt.Errorf("failed to check FirmwareUpdateJob existence: %w", err)
-	}
-
-	var savedResource *ent.Resource
-	if ent.IsNotFound(err) {
-		// Create new resource
-		savedResource, err = createBuilder.Save(ctx)
+	return withSQLiteWriteRetry(ctx, func() error {
+		// Convert to Ent entity
+		createBuilder, labels, annotations, err := ToEntResource(resource)
 		if err != nil {
-			return fmt.Errorf("failed to create FirmwareUpdateJob: %w", err)
+			return fmt.Errorf("failed to convert FirmwareUpdateJob to ent: %w", err)
 		}
-	} else {
-		// Update existing resource
-		spec, _ := json.Marshal(resource.Spec)
-		status, _ := json.Marshal(resource.Status)
 
-		savedResource, err = entClient.Resource.UpdateOne(entResource).
-			SetName(resource.Metadata.Name).
-			SetAPIVersion(resource.APIVersion).
-			SetSpec(spec).
-			SetStatus(status).
-			SetUpdatedAt(time.Now()).
-			Save(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to update FirmwareUpdateJob: %w", err)
+		// Use upsert pattern: try to update, if not exists then create
+		entResource, err := entClient.Resource.Query().
+			Where(entresource.UIDEQ(resource.GetUID())).
+			Only(ctx)
+
+		if err != nil && !ent.IsNotFound(err) {
+			return fmt.Errorf("failed to check FirmwareUpdateJob existence: %w", err)
 		}
+
+		var savedResource *ent.Resource
+		if ent.IsNotFound(err) {
+			// Create new resource
+			savedResource, err = createBuilder.Save(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to create FirmwareUpdateJob: %w", err)
+			}
+		} else {
+			// Update existing resource
+			spec, _ := json.Marshal(resource.Spec)
+			status, _ := json.Marshal(resource.Status)
+
+			savedResource, err = entClient.Resource.UpdateOne(entResource).
+				SetName(resource.Metadata.Name).
+				SetAPIVersion(resource.APIVersion).
+				SetSpec(spec).
+				SetStatus(status).
+				SetUpdatedAt(time.Now()).
+				Save(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to update FirmwareUpdateJob: %w", err)
+			}
+		}
+
+		if err := saveLabels(ctx, savedResource.ID, labels); err != nil {
+			return err
+		}
+
+		if err := saveAnnotations(ctx, savedResource.ID, annotations); err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func withSQLiteWriteRetry(ctx context.Context, operation func() error) error {
+	var lastErr error
+	backoff := 50 * time.Millisecond
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if !isSQLiteLockError(err) || attempt == 5 {
+			break
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
 	}
 
-	// Save labels
-	if err := saveLabels(ctx, savedResource.ID, labels); err != nil {
-		return err
+	return lastErr
+}
+
+func isSQLiteLockError(err error) bool {
+	if err == nil {
+		return false
 	}
 
-	// Save annotations
-	if err := saveAnnotations(ctx, savedResource.ID, annotations); err != nil {
-		return err
-	}
-
-	return nil
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked")
 }
 
 // DeleteFirmwareUpdateJob deletes a FirmwareUpdateJob resource from Ent storage
@@ -197,6 +383,12 @@ func (b *entStorageBackend) LoadAll(ctx context.Context, resourceType string) ([
 		return nil, err
 	}
 	switch resourceType {
+	case "FirmwareUpdateCampaign":
+		resources, err := LoadAllFirmwareUpdateCampaigns(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return marshalTypedList(resources)
 	case "FirmwareUpdateJob":
 		resources, err := LoadAllFirmwareUpdateJobs(ctx)
 		if err != nil {
@@ -213,6 +405,12 @@ func (b *entStorageBackend) Load(ctx context.Context, resourceType, uid string) 
 		return nil, err
 	}
 	switch resourceType {
+	case "FirmwareUpdateCampaign":
+		resource, err := LoadFirmwareUpdateCampaign(ctx, uid)
+		if err != nil {
+			return nil, err
+		}
+		return marshalResource(resource)
 	case "FirmwareUpdateJob":
 		resource, err := LoadFirmwareUpdateJob(ctx, uid)
 		if err != nil {
@@ -229,6 +427,13 @@ func (b *entStorageBackend) Save(ctx context.Context, resourceType, uid string, 
 		return err
 	}
 	switch resourceType {
+	case "FirmwareUpdateCampaign":
+		var res v1.FirmwareUpdateCampaign
+		if err := json.Unmarshal(data, &res); err != nil {
+			return fmt.Errorf("failed to unmarshal FirmwareUpdateCampaign: %w", err)
+		}
+		res.Metadata.UID = uid
+		return SaveFirmwareUpdateCampaign(ctx, &res)
 	case "FirmwareUpdateJob":
 		var res v1.FirmwareUpdateJob
 		if err := json.Unmarshal(data, &res); err != nil {
@@ -246,6 +451,8 @@ func (b *entStorageBackend) Delete(ctx context.Context, resourceType, uid string
 		return err
 	}
 	switch resourceType {
+	case "FirmwareUpdateCampaign":
+		return DeleteFirmwareUpdateCampaign(ctx, uid)
 	case "FirmwareUpdateJob":
 		return DeleteFirmwareUpdateJob(ctx, uid)
 	default:
@@ -324,6 +531,12 @@ func (c *StorageClient) Get(ctx context.Context, kind, uid string) (interface{},
 
 	// Unmarshal based on kind
 	switch kind {
+	case "FirmwareUpdateCampaign":
+		var resource v1.FirmwareUpdateCampaign
+		if err := json.Unmarshal(raw, &resource); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal FirmwareUpdateCampaign: %w", err)
+		}
+		return &resource, nil
 	case "FirmwareUpdateJob":
 		var resource v1.FirmwareUpdateJob
 		if err := json.Unmarshal(raw, &resource); err != nil {
@@ -343,6 +556,16 @@ func (c *StorageClient) List(ctx context.Context, kind string) ([]interface{}, e
 
 	// Unmarshal based on kind
 	switch kind {
+	case "FirmwareUpdateCampaign":
+		result := make([]interface{}, 0, len(items))
+		for _, item := range items {
+			var resource v1.FirmwareUpdateCampaign
+			if err := json.Unmarshal(item, &resource); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal FirmwareUpdateCampaign: %w", err)
+			}
+			result = append(result, &resource)
+		}
+		return result, nil
 	case "FirmwareUpdateJob":
 		result := make([]interface{}, 0, len(items))
 		for _, item := range items {
@@ -366,6 +589,8 @@ func (c *StorageClient) Update(ctx context.Context, resource interface{}) error 
 
 	// Extract kind and UID based on type
 	switch res := resource.(type) {
+	case *v1.FirmwareUpdateCampaign:
+		return c.backend.Save(ctx, "FirmwareUpdateCampaign", res.Metadata.UID, data)
 	case *v1.FirmwareUpdateJob:
 		return c.backend.Save(ctx, "FirmwareUpdateJob", res.Metadata.UID, data)
 	default:

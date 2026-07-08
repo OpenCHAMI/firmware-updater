@@ -312,6 +312,93 @@ func (c *Client) GetHealth(ctx context.Context) (HealthResponse, error) {
 	return result, nil
 }
 
+// GetFirmwareUpdateCampaigns retrieves all firmwareupdatecampaigns
+func (c *Client) GetFirmwareUpdateCampaigns(ctx context.Context) ([]v1.FirmwareUpdateCampaign, error) {
+	var response []v1.FirmwareUpdateCampaign
+	if err := c.doRequest(ctx, "GET", "/firmwareupdatecampaigns", nil, &response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+// GetFirmwareUpdateCampaign retrieves a specific FirmwareUpdateCampaign by UID
+func (c *Client) GetFirmwareUpdateCampaign(ctx context.Context, uid string) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s", uid)
+	if err := c.doRequest(ctx, "GET", endpoint, nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// CreateFirmwareUpdateCampaign creates a new FirmwareUpdateCampaign
+func (c *Client) CreateFirmwareUpdateCampaign(ctx context.Context, req CreateFirmwareUpdateCampaignRequest) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	if err := c.doRequest(ctx, "POST", "/firmwareupdatecampaigns", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// UpdateFirmwareUpdateCampaign updates an existing FirmwareUpdateCampaign
+func (c *Client) UpdateFirmwareUpdateCampaign(ctx context.Context, uid string, req UpdateFirmwareUpdateCampaignRequest) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s", uid)
+	if err := c.doRequest(ctx, "PUT", endpoint, req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// PatchFirmwareUpdateCampaign patches an existing FirmwareUpdateCampaign spec with the specified patch data and content type
+func (c *Client) PatchFirmwareUpdateCampaign(ctx context.Context, uid string, patchData []byte, contentType string) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s", uid)
+	if err := c.doPatchRequest(ctx, endpoint, patchData, contentType, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// UpdateFirmwareUpdateCampaignStatus updates only the status of an existing FirmwareUpdateCampaign
+// This method is intended for controllers, reconcilers, and monitoring systems.
+// It preserves the spec and only updates the status portion of the resource.
+func (c *Client) UpdateFirmwareUpdateCampaignStatus(ctx context.Context, uid string, status v1.FirmwareUpdateCampaignStatus) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s/status", uid)
+	if err := c.doRequest(ctx, "PUT", endpoint, status, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// PatchFirmwareUpdateCampaignStatus patches only the status of an existing FirmwareUpdateCampaign
+// Supports JSON Merge Patch by default. Use PatchFirmwareUpdateCampaignStatusWithType for other patch formats.
+func (c *Client) PatchFirmwareUpdateCampaignStatus(ctx context.Context, uid string, patchData []byte) (*v1.FirmwareUpdateCampaign, error) {
+	return c.PatchFirmwareUpdateCampaignStatusWithType(ctx, uid, patchData, "application/merge-patch+json")
+}
+
+// PatchFirmwareUpdateCampaignStatusWithType patches status with a specific patch content type
+// Supported types: application/merge-patch+json, application/json-patch+json, application/fabrica-patch+json
+func (c *Client) PatchFirmwareUpdateCampaignStatusWithType(ctx context.Context, uid string, patchData []byte, contentType string) (*v1.FirmwareUpdateCampaign, error) {
+	var result v1.FirmwareUpdateCampaign
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s/status", uid)
+	if err := c.doPatchRequest(ctx, endpoint, patchData, contentType, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DeleteFirmwareUpdateCampaign deletes a FirmwareUpdateCampaign by UID
+func (c *Client) DeleteFirmwareUpdateCampaign(ctx context.Context, uid string) error {
+	endpoint := fmt.Sprintf("/firmwareupdatecampaigns/%s", uid)
+	var response DeleteResponse
+	if err := c.doRequest(ctx, "DELETE", endpoint, nil, &response); err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetFirmwareUpdateJobs retrieves all firmwareupdatejobs
 func (c *Client) GetFirmwareUpdateJobs(ctx context.Context) ([]v1.FirmwareUpdateJob, error) {
 	var response []v1.FirmwareUpdateJob

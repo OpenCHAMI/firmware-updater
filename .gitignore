@@ -31,3 +31,5 @@ data/
 *.swp
 *.swo
 *~
+
+secrets.json

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/OpenCHAMI/magellan/pkg/secrets"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -205,11 +207,26 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Initialize storage backend
 
-	// Connect to database
-	client, err := ent.Open("sqlite3", config.DatabaseURL)
+	// Ensure SQLite uses WAL journal mode and a busy timeout so that concurrent
+	// reconciler goroutines don't immediately fail with "table is locked".
+	dbURL := config.DatabaseURL
+	if !strings.Contains(dbURL, "_journal_mode") {
+		if strings.Contains(dbURL, "?") {
+			dbURL += "&_journal_mode=WAL&_busy_timeout=5000"
+		} else {
+			dbURL += "?_journal_mode=WAL&_busy_timeout=5000"
+		}
+	}
+
+	// Connect to database. SQLite permits only one writer at a time, so keep
+	// the pool serialized and rely on busy_timeout for short write contention.
+	sqlDB, err := sql.Open("sqlite3", dbURL)
 	if err != nil {
 		return fmt.Errorf("failed opening connection to sqlite3: %w", err)
 	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	client := ent.NewClient(ent.Driver(entsql.OpenDB("sqlite3", sqlDB)))
 	defer client.Close()
 
 	// Run auto-migration

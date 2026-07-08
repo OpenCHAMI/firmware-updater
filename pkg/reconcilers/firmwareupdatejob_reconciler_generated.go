@@ -20,7 +20,7 @@ import (
 
 	"github.com/openchami/fabrica/pkg/events"
 	"github.com/openchami/fabrica/pkg/reconcile"
-	"github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 )
 
 // FirmwareUpdateJobReconciler reconciles FirmwareUpdateJob resources.
@@ -134,6 +134,10 @@ func (r *FirmwareUpdateJobReconciler) Reconcile(ctx context.Context, resource in
 			// Don't fail reconciliation if event emission fails
 		}
 	*/
+
+	if res.Status.JobState == "InProgress" {
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 
 	// Requeue after 5 minutes for periodic reconciliation
 	return reconcile.Result{RequeueAfter: 5 * time.Minute}, nil

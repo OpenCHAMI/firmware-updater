@@ -150,3 +150,88 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/firmwareupdatejob-8eab5b0e
 ```
 
 The output will display a `status` block indicating the `jobState`. The states progress from `Pending` to `Resolving`, and then to either `InProgress`, `Completed`, or `Failed`. If a job fails, the exact network or Redfish error returned by the target hardware will be recorded in the `errorDetail` field.
+
+## 6. Bulk Cabinet Campaigns
+
+`FirmwareUpdateCampaign` is the bulk orchestration resource for cabinet-wide updates. It captures the shared payload settings once and fans the update out to each target listed in `spec.targets`.
+
+Campaigns support three submission patterns:
+
+1. Explicit payload mode: `spec.ociReference` plus `spec.component`.
+2. Component discovery mode: `spec.discovery` plus `spec.component`.
+3. Universal cabinet discovery mode: `spec.discovery.repository` only, with both `spec.component` and `spec.ociReference` omitted.
+
+### Example Campaign Submission
+
+This payload creates a campaign that will spawn one child job for each listed BMC. Each child job receives the same shared payload settings and its own `targetAddress`/`secretID` pair.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "x9000-cabinet-01"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "component": "BMC",
+      "ociReference": "quay.io/my-org/firmware/cray-bmc:1.10.2",
+      "targets": [
+        {
+          "targetAddress": "10.10.10.50",
+          "secretID": "x9000-bmc"
+        },
+        {
+          "targetAddress": "10.10.10.51",
+          "secretID": "x9000-bmc"
+        }
+      ]
+    }
+  }'
+```
+
+The server returns the campaign resource immediately. Reconciliation then creates individual `FirmwareUpdateJob` children and updates the parent campaign status with aggregate counts and a per-target job list.
+
+### Universal Cabinet Discovery Example
+
+Use this when a cabinet may contain different firmware-bearing components and you want the service to decide which ones actually need an update:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "x9000-universal-campaign"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "discovery": {
+        "repository": "quay.io/my-org/firmware"
+      },
+      "targets": [
+        {
+          "targetAddress": "10.10.10.50",
+          "secretID": "x9000-bmc"
+        }
+      ]
+    }
+  }'
+```
+
+In this mode the campaign reads Redfish firmware inventory, derives component-specific repository paths from the configured base path, compares installed versus OCI semantic versions, and only creates child jobs for components with a newer compatible payload.
+
+### Example Campaign Status Check
+
+```bash
+curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/campaign-1a2b3c4d
+```
+
+The `status.summary` object contains the total number of child jobs and how many are `completed`, `failed`, or still `pending`. In universal mode this can be larger than the number of input targets because one BMC can expand into multiple component-specific jobs. The `status.childJobs` array shows the linked job UID, target address, and current state for each child job.
+
+Campaign state transitions are:
+
+* `Pending` when no child jobs exist yet.
+* `InProgress` while any child job is still pending or active.
+* `Completed` when every child job succeeds.
+* `Failed` when every child job fails.
+* `CompletedWithErrors` when the batch finishes with a mix of successful and failed child jobs.
