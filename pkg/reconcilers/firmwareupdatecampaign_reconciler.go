@@ -53,27 +53,9 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 	if err != nil {
 		return fmt.Errorf("resolve desired campaign jobs: %w", err)
 	}
-
-	createdAny := false
-	for _, desired := range desiredJobs {
-		if _, exists := jobsByKey[desired.key]; exists {
-			continue
-		}
-
-		job := desired.job
-		uid, err := resource.GenerateUIDForResource("FirmwareUpdateJob")
-		if err != nil {
-			return fmt.Errorf("generate child FirmwareUpdateJob UID for child key %q: %w", desired.key, err)
-		}
-		job.Metadata.UID = uid
-		if err := r.Client.Create(ctx, job); err != nil {
-			return fmt.Errorf("create child FirmwareUpdateJob for child key %q: %w", desired.key, err)
-		}
-		if err := events.PublishResourceCreated(ctx, "FirmwareUpdateJob", job.Metadata.UID, job.Metadata.Name, job); err != nil {
-			r.Logger.Warnf("Failed to publish created event for child FirmwareUpdateJob %s: %v", job.Metadata.UID, err)
-		}
-		jobsByKey[desired.key] = job
-		createdAny = true
+	createdAny, err := r.reconcileDesiredCampaignJobs(ctx, desiredJobs, jobsByKey)
+	if err != nil {
+		return err
 	}
 
 	if createdAny && campaign.Status.CampaignState == v1.CampaignStatePending {
@@ -86,6 +68,45 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 	campaign.Status.CampaignState = deriveCampaignState(summary)
 
 	return nil
+}
+
+func (r *FirmwareUpdateCampaignReconciler) reconcileDesiredCampaignJobs(ctx context.Context, desiredJobs []desiredCampaignJob, jobsByKey map[string]*v1.FirmwareUpdateJob) (bool, error) {
+	sort.SliceStable(desiredJobs, func(i, j int) bool {
+		return desiredJobs[i].key < desiredJobs[j].key
+	})
+
+	activeTargets := buildActiveCampaignTargets(jobsByKey)
+	createdAny := false
+
+	for _, desired := range desiredJobs {
+		if _, exists := jobsByKey[desired.key]; exists {
+			continue
+		}
+
+		targetAddress := campaignChildTargetAddress(desired.job)
+		if activeTargets[targetAddress] {
+			continue
+		}
+
+		job := desired.job
+		uid, err := resource.GenerateUIDForResource("FirmwareUpdateJob")
+		if err != nil {
+			return false, fmt.Errorf("generate child FirmwareUpdateJob UID for child key %q: %w", desired.key, err)
+		}
+		job.Metadata.UID = uid
+		if err := r.Client.Create(ctx, job); err != nil {
+			return false, fmt.Errorf("create child FirmwareUpdateJob for child key %q: %w", desired.key, err)
+		}
+		if err := events.PublishResourceCreated(ctx, "FirmwareUpdateJob", job.Metadata.UID, job.Metadata.Name, job); err != nil {
+			r.Logger.Warnf("Failed to publish created event for child FirmwareUpdateJob %s: %v", job.Metadata.UID, err)
+		}
+
+		jobsByKey[desired.key] = job
+		activeTargets[targetAddress] = true
+		createdAny = true
+	}
+
+	return createdAny, nil
 }
 
 func (r *FirmwareUpdateCampaignReconciler) desiredCampaignJobs(ctx context.Context, campaign *v1.FirmwareUpdateCampaign) ([]desiredCampaignJob, error) {
@@ -243,6 +264,32 @@ func summarizeCampaignJobs(jobsByTarget map[string]*v1.FirmwareUpdateJob) (v1.Ca
 	}
 
 	return out, childJobs
+}
+
+func buildActiveCampaignTargets(jobsByKey map[string]*v1.FirmwareUpdateJob) map[string]bool {
+	activeTargets := make(map[string]bool)
+	for _, job := range jobsByKey {
+		if !campaignJobIsActive(job) {
+			continue
+		}
+
+		targetAddress := campaignChildTargetAddress(job)
+		if targetAddress == "" {
+			continue
+		}
+		activeTargets[targetAddress] = true
+	}
+
+	return activeTargets
+}
+
+func campaignJobIsActive(job *v1.FirmwareUpdateJob) bool {
+	if job == nil {
+		return false
+	}
+
+	state := strings.TrimSpace(job.Status.JobState)
+	return state != v1.CampaignStateCompleted && state != v1.CampaignStateFailed
 }
 
 func deriveCampaignState(summary v1.CampaignSummary) string {
