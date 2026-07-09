@@ -90,7 +90,8 @@ If you need details, jump to:
 - [How OCI paths are derived](#2-how-to-identify-required-oci-paths)
 - [How target Redfish paths are derived](#3-how-to-identify-required-redfish-target-paths)
 - [Credentials model](#4-how-credentials-work)
-- [Troubleshooting](#8-troubleshooting-quick-reference)
+- [Registry authentication](#5-how-to-configure-registry-authentication)
+- [Troubleshooting](#9-troubleshooting-quick-reference)
 
 ## Current Validated State (2026-07-09)
 
@@ -267,10 +268,34 @@ go run ./cmd/server serve \
 ```
 
 Notes:
-- Registry auth is optional and configured separately via server config/env (`quay_username`, `quay_password`).
+- Registry auth is optional; see [section 5](#5-how-to-configure-registry-authentication) for details.
 - Secret value content is JSON containing non-empty `username` and `password`.
 
-## 5. How To Update A Full Cabinet (Universal Campaign)
+## 5. How To Configure Registry Authentication
+
+If your OCI registry requires authentication (e.g. Quay.io or a private registry with basic auth), set the following environment variables before starting the server:
+
+```bash
+export FIRMWARE_UPDATER_QUAY_USERNAME=<your-username>
+export FIRMWARE_UPDATER_QUAY_PASSWORD=<your-password>
+```
+
+Then start the server as normal:
+
+```bash
+go run ./cmd/server serve \
+  --port 8090 \
+  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
+  --secrets-file ./secrets.json
+```
+
+Notes:
+- If either variable is empty or unset, all registry access falls back to anonymous (unauthenticated).
+- These credentials are global for all outbound OCI registry requests made by this service instance (tag discovery, manifest fetches, blob streaming).
+- Credentials are runtime in-memory configuration only and are never persisted to API resources or the secrets file.
+- Avoid embedding credentials in shell history in production; prefer exporting from a secrets manager or sourcing from a file.
+
+## 6. How To Update A Full Cabinet (Universal Campaign)
 
 Use a single campaign with:
 - `spec.discovery.repository` set to a base repository.
@@ -316,7 +341,7 @@ Expected behavior from validated run:
 - One campaign expanded into three child jobs.
 - Two jobs were for the same target (`x9000c3s7b1`) and ran sequentially because campaign reconciliation allows only one active child per target at a time.
 
-## 6. State Model And What To Watch
+## 7. State Model And What To Watch
 
 Campaign states:
 - `Pending`
@@ -337,7 +362,7 @@ Child visibility:
 Job states:
 - `Pending` -> `Resolving` -> `InProgress` -> terminal (`Completed` or `Failed`)
 
-## 7. Essential Operational Notes
+## 8. Essential Operational Notes
 
 1. Proxy address/port behavior
 - The update payload URI sent to Redfish is built as `http://<serverProxyAddress>:8090/firmware-proxy/layer/<digest>`.
@@ -359,7 +384,7 @@ Job states:
 - In universal mode, create component-specific repos under a base path to control update eligibility by component.
 - Missing repos (404) are effectively treated as “no update candidate here”.
 
-## 8. Troubleshooting Quick Reference
+## 9. Troubleshooting Quick Reference
 
 - Error: `spec.discovery.hardwareModel must be provided when spec.component is set`
   - Cause: campaign used component discovery mode without full discovery fields.
@@ -381,7 +406,7 @@ Job states:
   - Cause: no compatible manifest, no semver-valid version annotation, or repository path mismatch.
   - Fix: verify repo naming/slugs and annotations.
 
-## 9. Minimal End-To-End Checklist
+## 10. Minimal End-To-End Checklist
 
 1. Export valid `MASTER_KEY`.
 2. Write target credentials via `secret-cli`.
