@@ -63,6 +63,13 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 	}
 
 	summary, childJobs := summarizeCampaignJobs(jobsByKey)
+
+	// Adjust summary to account for desired jobs that are queued by the sequencer
+	if len(desiredJobs) > summary.Total {
+		summary.Pending += len(desiredJobs) - summary.Total
+		summary.Total = len(desiredJobs)
+	}
+
 	campaign.Status.Summary = summary
 	campaign.Status.ChildJobs = childJobs
 	campaign.Status.CampaignState = deriveCampaignState(summary)
