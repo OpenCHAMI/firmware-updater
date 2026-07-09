@@ -443,7 +443,3 @@ Job states:
 5. Submit campaign (component or universal mode).
 6. Watch campaign and job status endpoints until terminal states.
 7. Inspect `errorDetail` fields for actionable failures.
-
----
-
-This TEMP README is intentionally focused on current behavior and tested workflow, and is meant to replace scattered/older guidance while this PR is in review.
