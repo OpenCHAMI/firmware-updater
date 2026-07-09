@@ -1,6 +1,96 @@
-# Firmware Updater TEMP README
+# Firmware Updater
 
-This document is the current source of truth for how `FirmwareUpdateCampaign` works in this repository, based on implementation behavior and the latest validation run on 2026-07-09.
+## TL;DR: Copy/Paste Runbook
+
+Use this if you just want the shortest path to run a full-cabinet universal campaign and to see the user workflow.
+
+### 1) Set key and write BMC credentials
+
+```bash
+export MASTER_KEY="$(openssl rand -hex 32)"
+
+go run ./cmd/secret-cli \
+  --secret-id x9000-bmc \
+  --username root \
+  --password initial0 \
+  --store-path ./secrets.json
+```
+
+### 2) Start server
+
+```bash
+go run ./cmd/server serve \
+  --port 8090 \
+  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
+  --secrets-file ./secrets.json
+```
+
+### 3) Push firmware artifacts with required ORAS metadata
+
+```bash
+oras push 127.0.0.1:5000/firmware/bmc:99.99.99 \
+  --plain-http \
+  --artifact-type application/vnd.openchami.firmware.bundle.v1+json \
+  --annotation "dev.fabrica.hardware.compatible=x9000" \
+  --annotation "org.opencontainers.image.version=99.99.99" \
+  dummy_firmware:application/vnd.openchami.firmware.payload.v1
+
+oras push 127.0.0.1:5000/firmware/fpga0:99.99.99 \
+  --plain-http \
+  --artifact-type application/vnd.openchami.firmware.bundle.v1+json \
+  --annotation "dev.fabrica.hardware.compatible=FPGA0" \
+  --annotation "org.opencontainers.image.version=99.99.99" \
+  dummy_firmware:application/vnd.openchami.firmware.payload.v1
+
+oras push 127.0.0.1:5000/firmware/17:3.0.0 \
+  --plain-http \
+  --artifact-type application/vnd.openchami.firmware.bundle.v1+json \
+  --annotation "org.opencontainers.image.version=3.0.0" \
+  --annotation "dev.fabrica.hardware.compatible=Embedded Video Controller,102b0538159000e4" \
+  ./dummy-video.bin:application/octet-stream
+```
+
+### 4) Submit universal campaign
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "live-cray-auto-cabinet"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "targets": [
+        {
+          "targetAddress": "x9000c3s7b1",
+          "secretID": "x9000-bmc"
+        },
+        {
+          "targetAddress": "x3000c0s21b0",
+          "secretID": "x9000-bmc"
+        }
+      ],
+      "discovery": {
+        "repository": "127.0.0.1:5000/firmware"
+      }
+    }
+  }'
+```
+
+### 5) Watch campaign and jobs
+
+```bash
+curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/ | jq
+curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
+```
+
+If you need details, jump to:
+- [ORAS rules](#oras-rules-required-for-discovery)
+- [How OCI paths are derived](#how-oci-paths-are-derived)
+- [How target Redfish paths are derived](#how-target-redfish-paths-are-derived)
+- [Credentials model](#credentials-model)
+- [Troubleshooting](#troubleshooting)
 
 ## Current Validated State (2026-07-09)
 
