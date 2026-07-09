@@ -1,35 +1,65 @@
 # Firmware Updater TEMP README
 
-Current source of truth for FirmwareUpdateCampaign usage in this repository.
+This document is the current source of truth for how `FirmwareUpdateCampaign` works in this repository, based on implementation behavior and the latest validation run on 2026-07-09.
 
-Last validated: 2026-07-09.
+## Current Validated State (2026-07-09)
 
-## TL;DR: Copy/Paste Runbook
+Validated scenarios:
+- Single BMC updating multiple device targets.
+- Multi-target campaign with mixed hardware, where one BMC had multiple firmware components and those component jobs executed sequentially.
 
-Use this if you just want the shortest path to run a full-cabinet universal campaign.
+What was validated:
+- Campaign creation and child job fan-out.
+- Universal discovery creating multiple jobs from Redfish inventory.
+- ORAS annotations being used to discover compatible artifacts.
+- Sequential execution per target address (no concurrent active child jobs for the same target in one campaign).
+- Failure handling and error propagation into `status.errorDetail`.
 
-### 1) Set key and write BMC credentials
+Observed result from latest run:
+- Campaign produced 3 child jobs total.
+- All 3 failed intentionally due to dummy payloads or Redfish rejection.
+- This behavior was expected for this test.
 
-```bash
-export MASTER_KEY="$(openssl rand -hex 32)"
+## What `FirmwareUpdateCampaign` Supports
 
-go run ./cmd/secret-cli \
-  --secret-id x9000-bmc \
-  --username root \
-  --password initial0 \
-  --store-path ./secrets.json
-```
+`FirmwareUpdateCampaign` supports three modes:
 
-### 2) Start server
+1. Explicit mode:
+- Set `spec.ociReference` and `spec.component`.
 
-```bash
-go run ./cmd/server serve \
-  --port 8090 \
-  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
-  --secrets-file ./secrets.json
-```
+2. Component discovery mode:
+- Set `spec.discovery.repository`, `spec.discovery.hardwareModel`, `spec.discovery.version`, and `spec.component`.
 
-### 3) Push firmware artifacts with required ORAS metadata
+3. Universal cabinet discovery mode:
+- Set only `spec.discovery.repository` (omit `spec.component` and `spec.ociReference`).
+- Controller discovers firmware inventory members for each target and evaluates each component independently.
+
+Validation rules enforced by API type validation:
+- `spec.serverProxyAddress` is required.
+- `spec.targets[]` is required; each entry must include `targetAddress` and `secretID`.
+- `spec.ociReference` and `spec.discovery` are mutually exclusive.
+- At least one of `spec.ociReference` or `spec.discovery` must be present.
+- If campaign uses `spec.ociReference`, `spec.component` must be set.
+- If campaign uses `spec.discovery` with `spec.component`, then `spec.discovery.hardwareModel` and `spec.discovery.version` are required.
+
+## 1. How To Push Images Correctly With ORAS
+
+The resolver only considers manifests that satisfy all of these:
+- `artifactType` is exactly `application/vnd.openchami.firmware.bundle.v1+json`.
+- The manifest has at least one layer.
+- `org.opencontainers.image.version` is present and parseable as semver (supports optional leading `v`).
+- Compatibility annotation matches (rules below).
+
+Compatibility annotation key:
+- `dev.fabrica.hardware.compatible`
+
+Version annotation key:
+- `org.opencontainers.image.version`
+
+Recommended payload layer media type used in examples:
+- `application/vnd.openchami.firmware.payload.v1`
+
+### Validated ORAS pushes from latest run
 
 ```bash
 oras push 127.0.0.1:5000/firmware/bmc:99.99.99 \
@@ -54,205 +84,223 @@ oras push 127.0.0.1:5000/firmware/17:3.0.0 \
   ./dummy-video.bin:application/octet-stream
 ```
 
-### 4) Submit universal campaign
+### Compatibility matching behavior
+
+- Matching is token-based and case-insensitive.
+- The compatibility annotation can be comma/semicolon/newline separated.
+- Universal discovery compares annotation tokens against many hardware hints extracted from Redfish member details (`Id`, `Name`, `Description`, `Model`, `SKU`, `PartNumber`, `SoftwareId`, `@odata.id`, related items, and target address).
+
+## 2. How To Identify Required OCI Paths
+
+### Component discovery mode
+
+You explicitly provide `spec.discovery.repository` (for example `registry/firmware/bmc`) and `spec.component`.
+
+### Universal cabinet discovery mode
+
+Given base repository `X` from `spec.discovery.repository`, for each discovered inventory component identifier the controller tries repositories in this order:
+
+1. `X/<slug>`
+2. `X/<compact-slug>` (same slug with hyphens removed, if different)
+3. `X` (base fallback)
+
+Slug generation:
+- Source identifier is component `Id`, else `Name`, else `@odata.id`.
+- Lowercase.
+- Replace non `[a-zA-Z0-9-]` chars with `-`.
+- Trim leading/trailing `-`.
+
+Examples:
+- `BMC` -> `bmc`
+- `FPGA0` -> `fpga0`
+- `Cabinet Controller` -> `cabinet-controller`, then `cabinetcontroller`, then base repo
+
+If a candidate repository returns 404, that candidate is skipped and the reconciler continues searching remaining candidates for that component.
+
+## 3. How To Identify Required Redfish Target Paths
+
+A firmware update eventually needs `spec.targets` in each child `FirmwareUpdateJob` (Redfish inventory member URIs).
+
+How these are set:
+
+1. Component mode (job or non-universal campaign child):
+- If `spec.component` is set and `spec.targets` is empty, controller queries:
+  - `GET https://<target>/redfish/v1/UpdateService/FirmwareInventory`
+- For each member, it fetches member detail and matches component string (case-insensitive substring) against `Id`, `Name`, or `Description`.
+- Matching `@odata.id` values become `spec.targets`.
+
+2. Universal campaign mode:
+- Controller discovers inventory members directly and creates child jobs with exactly one target URI per discovered component (`spec.targets = [componentURI]`).
+
+3. Manual override:
+- You may set `spec.targets` directly in a `FirmwareUpdateJob` if auto-discovery is not suitable.
+
+### Practical way to discover paths yourself
+
+```bash
+curl -sk -u <user>:<pass> https://<bmc>/redfish/v1/UpdateService/FirmwareInventory | jq
+```
+
+Then inspect each member URI and details:
+
+```bash
+curl -sk -u <user>:<pass> https://<bmc>/redfish/v1/UpdateService/FirmwareInventory/<member> | jq
+```
+
+## 4. How Credentials Work
+
+Credentials are resolved from encrypted secret store entries by `spec.secretID`.
+
+Requirements:
+- `MASTER_KEY` must be set and must be a 64-char hex string (32 bytes decoded; AES-256).
+- Server must be started with a secrets file path that exists.
+- The same `MASTER_KEY` must be used to write and read secrets.
+
+Write credentials:
+
+```bash
+export MASTER_KEY="$(openssl rand -hex 32)"
+go run ./cmd/secret-cli \
+  --secret-id x9000-bmc \
+  --username root \
+  --password initial0 \
+  --store-path ./secrets.json
+```
+
+Start server:
+
+```bash
+go run ./cmd/server serve \
+  --port 8090 \
+  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
+  --secrets-file ./secrets.json
+```
+
+Notes:
+- Registry auth is optional and configured separately via server config/env (`quay_username`, `quay_password`).
+- Secret value content is JSON containing non-empty `username` and `password`.
+
+## 5. How To Update A Full Cabinet (Universal Campaign)
+
+Use a single campaign with:
+- `spec.discovery.repository` set to a base repository.
+- Multiple entries in `spec.targets`.
+- No `spec.component` and no `spec.ociReference`.
+
+### Validated campaign submission from latest run
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "metadata": {
-      "name": "live-cray-auto-cabinet"
-    },
-    "spec": {
-      "serverProxyAddress": "10.254.1.20",
-      "targets": [
-        {
-          "targetAddress": "x9000c3s7b1",
-          "secretID": "x9000-bmc"
-        },
-        {
-          "targetAddress": "x3000c0s21b0",
-          "secretID": "x9000-bmc"
-        }
-      ],
-      "discovery": {
-        "repository": "127.0.0.1:5000/firmware"
-      }
-    }
-  }'
+   -H 'Content-Type: application/json' \
+   -d '{
+     "metadata": {
+       "name": "live-cray-auto-cabinet"
+     },
+     "spec": {
+       "serverProxyAddress": "10.254.1.20",
+       "targets": [
+         {
+           "targetAddress": "x9000c3s7b1",
+           "secretID": "x9000-bmc"
+         },
+         {
+           "targetAddress": "x3000c0s21b0",
+           "secretID": "x9000-bmc"
+         }
+       ],
+       "discovery": {
+         "repository": "127.0.0.1:5000/firmware"
+       }
+     }
+   }'
 ```
 
-### 5) Watch campaign and jobs
+### Verify campaign and child jobs
 
 ```bash
 curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/ | jq
 curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
 ```
 
-If you need details, jump to:
-- [ORAS rules](#oras-rules-required-for-discovery)
-- [How OCI paths are derived](#how-oci-paths-are-derived)
-- [How target Redfish paths are derived](#how-target-redfish-paths-are-derived)
-- [Credentials model](#credentials-model)
-- [Troubleshooting](#troubleshooting)
+Expected behavior from validated run:
+- One campaign expanded into three child jobs.
+- Two jobs were for the same target (`x9000c3s7b1`) and ran sequentially because campaign reconciliation allows only one active child per target at a time.
 
-## Quick Facts
+## 6. State Model And What To Watch
 
-- Validated with:
-  - Single BMC with multiple component targets.
-  - Multiple target systems in one campaign.
-- Observed in latest run:
-  - 1 campaign expanded to 3 child jobs.
-  - Jobs for the same target were sequenced (not concurrent).
-  - All failed intentionally due to dummy payloads and expected Redfish rejection paths.
+Campaign states:
+- `Pending`
+- `InProgress`
+- `Completed`
+- `Failed`
+- `CompletedWithErrors`
 
-## Campaign Modes
+Campaign summary:
+- `status.summary.total`
+- `status.summary.completed`
+- `status.summary.failed`
+- `status.summary.pending`
 
-1. Explicit mode
-   - Set spec.ociReference and spec.component.
-2. Component discovery mode
-   - Set spec.discovery.repository + spec.discovery.hardwareModel + spec.discovery.version + spec.component.
-3. Universal cabinet discovery mode
-   - Set only spec.discovery.repository.
-   - Omit spec.component and spec.ociReference.
+Child visibility:
+- `status.childJobs[]` includes `targetAddress`, `jobUID`, `jobState`, and `errorDetail`.
 
-## ORAS Rules Required For Discovery
+Job states:
+- `Pending` -> `Resolving` -> `InProgress` -> terminal (`Completed` or `Failed`)
 
-The resolver only considers manifests that meet all of the following.
+## 7. Essential Operational Notes
 
-| Field | Required value |
-| --- | --- |
-| Artifact type | application/vnd.openchami.firmware.bundle.v1+json |
-| Compatibility annotation | dev.fabrica.hardware.compatible |
-| Version annotation | org.opencontainers.image.version |
-| Version format | Semantic version (v prefix allowed) |
-| Layers | At least one layer |
+1. Proxy address/port behavior
+- The update payload URI sent to Redfish is built as `http://<serverProxyAddress>:8090/firmware-proxy/layer/<digest>`.
+- This currently uses port `8090` in reconciler logic.
+- Ensure BMCs can route to that IP:port.
 
-Compatibility matching is token-based and case-insensitive.
+2. TLS behavior
+- Redfish calls use HTTPS with TLS verification disabled (`InsecureSkipVerify`).
 
-## How OCI Paths Are Derived
+3. Retry behavior
+- Key network/discovery operations use exponential backoff retries (up to 4 attempts).
 
-### Component discovery mode
+4. Version comparison
+- OCI annotation versions are strict semver.
+- Installed Redfish version may include extended text; reconciler extracts semver substring when possible.
+- If installed version cannot be normalized, resolver treats newest compatible candidate as update-available.
 
-You provide spec.discovery.repository directly (example: 127.0.0.1:5000/firmware/bmc).
+5. Repository structure strategy
+- In universal mode, create component-specific repos under a base path to control update eligibility by component.
+- Missing repos (404) are effectively treated as “no update candidate here”.
 
-### Universal mode
+## 8. Troubleshooting Quick Reference
 
-From base repository X and discovered component identifier, the reconciler tries:
+- Error: `spec.discovery.hardwareModel must be provided when spec.component is set`
+  - Cause: campaign used component discovery mode without full discovery fields.
+  - Fix: include `hardwareModel` and `version`, or switch to universal mode.
 
-1. X/slug
-2. X/compact-slug (hyphens removed)
-3. X (base fallback)
+- Error: `spec.secretID is required` or secret decode/load failures
+  - Cause: missing/invalid secret mapping or invalid secret JSON payload.
+  - Fix: rewrite secret with `secret-cli` and ensure same `MASTER_KEY`.
 
-Slug behavior:
-- Lowercase identifier.
-- Replace non alphanumeric/hyphen chars with hyphen.
-- Trim leading/trailing hyphens.
+- Error: `http status 400: Redfish returned 400 Bad Request`
+  - Cause: target rejected request/payload.
+  - Fix: validate payload format expected by that component and Redfish endpoint behavior.
 
-Examples:
-- BMC -> bmc
-- FPGA0 -> fpga0
-- Cabinet Controller -> cabinet-controller -> cabinetcontroller -> base repo
+- Error: `Required 'version' file was missing from firmware archive.`
+  - Cause: payload accepted far enough for inventory/task response to report archive-content issue.
+  - Fix: package firmware payload with required internal files for that target.
 
-404 on one candidate path is treated as skip-and-continue.
+- No child jobs for a component in universal mode
+  - Cause: no compatible manifest, no semver-valid version annotation, or repository path mismatch.
+  - Fix: verify repo naming/slugs and annotations.
 
-## How Target Redfish Paths Are Derived
+## 9. Minimal End-To-End Checklist
 
-Child jobs need spec.targets (Redfish firmware inventory member URIs).
-
-1. If spec.component is set and spec.targets is empty:
-   - Reconciler queries:
-     - GET https://<target>/redfish/v1/UpdateService/FirmwareInventory
-   - It reads each member and matches component text against Id, Name, or Description.
-   - Matching member @odata.id values become spec.targets.
-
-2. In universal campaign mode:
-   - Each discovered component becomes one child job with one explicit target URI.
-
-3. Manual override:
-   - You can set spec.targets directly in a FirmwareUpdateJob.
-
-Quick path discovery commands:
-
-```bash
-curl -sk -u <user>:<pass> https://<bmc>/redfish/v1/UpdateService/FirmwareInventory | jq
-curl -sk -u <user>:<pass> https://<bmc>/redfish/v1/UpdateService/FirmwareInventory/<member> | jq
-```
-
-## Credentials Model
-
-- Credentials are stored by secret ID and loaded from encrypted secrets file.
-- MASTER_KEY must be a 64-character hex string (32-byte AES-256 key).
-- The same MASTER_KEY must be used by secret-cli and server.
-- Secret JSON value must contain non-empty username and password.
-
-Registry auth is separate (quay username/password config).
-
-## Behavior You Should Expect
-
-### Campaign states
-
-- Pending
-- InProgress
-- Completed
-- Failed
-- CompletedWithErrors
-
-### Job states
-
-Pending -> Resolving -> InProgress -> Completed or Failed
-
-### Operational constraints
-
-- Redfish payload URL is built as:
-  - http://<serverProxyAddress>:8090/firmware-proxy/layer/<digest>
-- Port 8090 is currently hardcoded in reconciler payload URL generation.
-- BMCs must be able to reach serverProxyAddress:8090.
-- Redfish HTTPS uses insecure TLS verification.
-- Network/discovery operations use retry with backoff.
-
-## Troubleshooting
-
-### spec.discovery.hardwareModel must be provided when spec.component is set
-
-Cause:
-- Component discovery mode requires hardwareModel and version.
-
-Fix:
-- Provide discovery.hardwareModel and discovery.version, or use universal mode.
-
-### spec.secretID is required / secret decode or load failures
-
-Cause:
-- Missing secret mapping, wrong MASTER_KEY, or malformed secret payload.
-
-Fix:
-- Rewrite secret with secret-cli and verify the same MASTER_KEY is used.
-
-### http status 400: Redfish returned 400 Bad Request
-
-Cause:
-- Target rejected request or payload.
-
-Fix:
-- Verify payload format and component endpoint expectations.
-
-### Required 'version' file was missing from firmware archive.
-
-Cause:
-- Payload archive format/content did not match platform expectation.
-
-Fix:
-- Rebuild firmware archive to include required internal metadata/files.
-
-### No child jobs created for a component in universal mode
-
-Cause:
-- No compatible manifest, semver annotation invalid/missing, or repository path mismatch.
-
-Fix:
-- Verify repository naming and required annotations.
+1. Export valid `MASTER_KEY`.
+2. Write target credentials via `secret-cli`.
+3. Start server with `--secrets-file` and reachable `--port`.
+4. Push firmware bundles with required ORAS artifact type and annotations.
+5. Submit campaign (component or universal mode).
+6. Watch campaign and job status endpoints until terminal states.
+7. Inspect `errorDetail` fields for actionable failures.
 
 ---
 
-This TEMP README intentionally prioritizes practical execution and current behavior over historical context.
+This TEMP README is intentionally focused on current behavior and tested workflow, and is meant to replace scattered/older guidance while this PR is in review.
