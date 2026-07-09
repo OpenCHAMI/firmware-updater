@@ -86,11 +86,11 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
 ```
 
 If you need details, jump to:
-- [ORAS rules](#oras-rules-required-for-discovery)
-- [How OCI paths are derived](#how-oci-paths-are-derived)
-- [How target Redfish paths are derived](#how-target-redfish-paths-are-derived)
-- [Credentials model](#credentials-model)
-- [Troubleshooting](#troubleshooting)
+- [ORAS rules](#1-how-to-push-images-correctly-with-oras)
+- [How OCI paths are derived](#2-how-to-identify-required-oci-paths)
+- [How target Redfish paths are derived](#3-how-to-identify-required-redfish-target-paths)
+- [Credentials model](#4-how-credentials-work)
+- [Troubleshooting](#8-troubleshooting-quick-reference)
 
 ## Current Validated State (2026-07-09)
 
