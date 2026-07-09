@@ -25,6 +25,20 @@ go run ./cmd/server serve \
   --secrets-file ./secrets.json
 ```
 
+Alternative (published container image with Podman):
+
+```bash
+podman run --replace \
+  --network host \
+  --name firmware-updater \
+  -v "$(pwd)/secrets.json:/secrets.json:ro" \
+  -e MASTER_KEY="${MASTER_KEY}" \
+  ghcr.io/openchami/firmware-updater:v0.6.2 \
+  serve --port 8090 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
+```
+
+Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
+
 ### 3) Push firmware artifacts with required ORAS metadata
 
 ```bash
@@ -266,6 +280,20 @@ go run ./cmd/server serve \
   --database-url="file:hpc_test.db?cache=shared&_fk=1" \
   --secrets-file ./secrets.json
 ```
+
+Alternative (published container image with Podman):
+
+```bash
+podman run --replace \
+  --network host \
+  --name firmware-updater \
+  -v "$(pwd)/secrets.json:/secrets.json:ro" \
+  -e MASTER_KEY="${MASTER_KEY}" \
+  ghcr.io/openchami/firmware-updater:v0.6.2 \
+  serve --port 8090 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
+```
+
+Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
 
 Notes:
 - Registry auth is optional; see [section 5](#5-how-to-configure-registry-authentication) for details.
