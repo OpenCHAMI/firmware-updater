@@ -559,10 +559,6 @@ type redfishInventoryVerification struct {
 }
 
 func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
-	if strings.TrimSpace(res.Status.ResolvedVersion) == "" {
-		return redfishInventoryVerification{}, nil
-	}
-
 	var lastErr error
 	backoff := time.Second
 
@@ -601,19 +597,33 @@ func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdat
 	}
 
 	resolvedVersion := strings.ToLower(strings.TrimSpace(res.Status.ResolvedVersion))
+
 	for _, target := range targets {
 		body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
 		if err != nil {
 			return redfishInventoryVerification{}, err
 		}
 
-		installedVersion := strings.ToLower(strings.TrimSpace(asString(body["Version"])))
-		if installedVersion == "" || !strings.Contains(installedVersion, resolvedVersion) {
-			if failed, detail := redfishInventoryFailure(body); failed {
-				return redfishInventoryVerification{Failed: true, Detail: detail}, nil
+		// Unconditionally check for a failure state in the component inventory first
+		if failed, detail := redfishInventoryFailure(body); failed {
+			return redfishInventoryVerification{Failed: true, Detail: detail}, nil
+		}
+
+		// Only evaluate version completion if a target version is known
+		if resolvedVersion != "" {
+			installedVersion := strings.ToLower(strings.TrimSpace(asString(body["Version"])))
+			if installedVersion == "" || !strings.Contains(installedVersion, resolvedVersion) {
+				return redfishInventoryVerification{}, nil
 			}
+		} else {
+			// If OCI reference was used, ResolvedVersion is empty. We can detect failures,
+			// but cannot verify completion via inventory polling alone.
 			return redfishInventoryVerification{}, nil
 		}
+	}
+
+	if resolvedVersion == "" {
+		return redfishInventoryVerification{}, nil
 	}
 
 	return redfishInventoryVerification{Updated: true}, nil
