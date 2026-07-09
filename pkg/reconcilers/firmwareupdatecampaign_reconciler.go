@@ -461,7 +461,7 @@ func discoverInventoryComponents(ctx context.Context, targetAddress, username, p
 			Identifier:       identifier,
 			TargetURI:        memberID,
 			InstalledVersion: stringValue(memberDetail["Version"]),
-			HardwareHints:    collectHardwareHints(memberDetail),
+			HardwareHints:    collectHardwareHints(targetAddress, memberDetail),
 		})
 	}
 
@@ -580,7 +580,7 @@ func campaignChildTargetAddress(job *v1.FirmwareUpdateJob) string {
 	return strings.TrimSpace(job.Spec.TargetAddress)
 }
 
-func collectHardwareHints(detail map[string]interface{}) []string {
+func collectHardwareHints(targetAddress string, detail map[string]interface{}) []string {
 	seen := make(map[string]struct{})
 	hints := make([]string, 0)
 
@@ -597,6 +597,7 @@ func collectHardwareHints(detail map[string]interface{}) []string {
 	for _, key := range []string{"Id", "Name", "Description", "Model", "SKU", "PartNumber", "SoftwareId", "@odata.id"} {
 		add(stringValue(detail[key]))
 	}
+	add(targetAddress)
 	collectStringValues(detail["RelatedItem"], add)
 
 	return hints

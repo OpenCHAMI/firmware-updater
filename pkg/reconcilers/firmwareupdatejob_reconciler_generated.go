@@ -120,7 +120,7 @@ func (r *FirmwareUpdateJobReconciler) Reconcile(ctx context.Context, resource in
 	r.SetCondition(&res, "Ready", "True", "ReconcileSuccess", "Reconciliation successful")
 
 	// Update status in storage
-	if err := r.UpdateStatus(ctx, &res); err != nil {
+	if err := r.updateJobStatus(ctx, &res); err != nil {
 		r.Logger.Errorf("Failed to update status for FirmwareUpdateJob %s: %v", res.GetUID(), err)
 		return reconcile.Result{Requeue: true, RequeueAfter: 10 * time.Second}, err
 	}
