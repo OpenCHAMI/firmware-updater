@@ -1,8 +1,11 @@
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates curl bash git
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates curl bash git \
+	&& rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -g 1000 firmware && adduser -D -u 1000 -G firmware firmware
+RUN groupadd -g 1000 firmware \
+	&& useradd -m -u 1000 -g firmware -d /home/firmware -s /usr/sbin/nologin firmware
 
 WORKDIR /home/firmware
 

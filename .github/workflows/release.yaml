@@ -65,6 +65,12 @@ jobs:
           version: latest
           args: release --clean
 
+      - name: Smoke test released amd64 image
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/openchami/firmware-updater:${{ github.ref_name }}-amd64
+          docker run --rm ghcr.io/openchami/firmware-updater:${{ github.ref_name }}-amd64 --help > /dev/null
+
       - name: Process GoReleaser output
         id: process_goreleaser_output
         run: |
