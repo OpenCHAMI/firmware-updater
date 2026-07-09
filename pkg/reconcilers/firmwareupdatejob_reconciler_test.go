@@ -8,7 +8,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/openchami/fabrica/pkg/events"
+	"github.com/openchami/fabrica/pkg/fabrica"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/internal/secretsruntime"
 )
@@ -171,6 +174,89 @@ func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
 	}
 	if !strings.Contains(job.Status.ErrorDetail, "missing from firmware archive") {
 		t.Fatalf("expected inventory failure detail, got %q", job.Status.ErrorDetail)
+	}
+}
+
+func TestUpdateJobStatusNotifiesOwningCampaignWhenJobFails(t *testing.T) {
+	ctx := context.Background()
+	client, cleanup := setupReconcilerTestStorageClient(t)
+	defer cleanup()
+
+	bus := events.NewInMemoryEventBus(16, 1)
+	bus.Start()
+	defer bus.Close()
+
+	previousBus := events.GetGlobalEventBus()
+	events.SetGlobalEventBus(bus)
+	defer events.SetGlobalEventBus(previousBus)
+
+	previousConfig := events.GetEventConfig()
+	events.SetEventConfig(&events.EventConfig{
+		Enabled:                true,
+		LifecycleEventsEnabled: true,
+		ConditionEventsEnabled: previousConfig.ConditionEventsEnabled,
+		EventTypePrefix:        previousConfig.EventTypePrefix,
+		ConditionEventPrefix:   previousConfig.ConditionEventPrefix,
+		Source:                 previousConfig.Source,
+	})
+	defer events.SetEventConfig(previousConfig)
+
+	campaign := &v1.FirmwareUpdateCampaign{
+		APIVersion: "hardware.fabrica.dev/v1",
+		Kind:       "FirmwareUpdateCampaign",
+		Metadata: fabrica.Metadata{
+			Name: "campaign",
+			UID:  "firmwareupdatecampaign-test",
+		},
+	}
+	if err := client.Create(ctx, campaign); err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	job := &v1.FirmwareUpdateJob{
+		APIVersion: "hardware.fabrica.dev/v1",
+		Kind:       "FirmwareUpdateJob",
+		Metadata: fabrica.Metadata{
+			Name: "job",
+			UID:  "firmwareupdatejob-test",
+			Annotations: map[string]string{
+				v1.CampaignUIDAnnotation: campaign.Metadata.UID,
+			},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			JobState: "InProgress",
+		},
+	}
+	if err := client.Create(ctx, job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	eventsCh := make(chan events.Event, 1)
+	if _, err := bus.Subscribe("**", func(_ context.Context, event events.Event) error {
+		if event.ResourceKind() == "FirmwareUpdateCampaign" && event.ResourceUID() == campaign.Metadata.UID {
+			select {
+			case eventsCh <- event:
+			default:
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("subscribe events: %v", err)
+	}
+
+	job.Status.JobState = "Failed"
+	reconciler := NewDefaultFirmwareUpdateJobReconciler(client, bus)
+	if err := reconciler.updateJobStatus(ctx, job); err != nil {
+		t.Fatalf("updateJobStatus returned error: %v", err)
+	}
+
+	select {
+	case event := <-eventsCh:
+		if event.ResourceKind() != "FirmwareUpdateCampaign" {
+			t.Fatalf("expected FirmwareUpdateCampaign event, got %q", event.ResourceKind())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for owning campaign notification")
 	}
 }
 

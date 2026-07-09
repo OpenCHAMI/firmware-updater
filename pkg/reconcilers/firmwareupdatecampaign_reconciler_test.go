@@ -68,6 +68,28 @@ func TestTokenizeHardwareHintExtractsModelPrefix(t *testing.T) {
 	}
 }
 
+func TestCollectHardwareHintsIncludesTargetAddressTokens(t *testing.T) {
+	hints := collectHardwareHints("x9000c3s7b1", map[string]interface{}{
+		"Id":          "BMC",
+		"Name":        "BMC",
+		"Description": "Baseboard Management Controller",
+		"SoftwareId":  "nc:*:*:*",
+	})
+
+	for _, expected := range []string{"bmc", "x9000c3s7b1", "x9000"} {
+		found := false
+		for _, hint := range hints {
+			if hint == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected hardware hints %v to include %q", hints, expected)
+		}
+	}
+}
+
 func TestBuildUniversalDiscoveryRepositories(t *testing.T) {
 	repositories := buildUniversalDiscoveryRepositories("127.0.0.1:5000/firmware", "Cabinet Controller")
 	if len(repositories) != 3 {
