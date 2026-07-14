@@ -19,6 +19,7 @@ import (
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/internal/secretsruntime"
+	"github.com/user/firmware-updater/pkg/deviceProfiles"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 )
 
@@ -149,27 +150,23 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
-	// Discover the UpdateService action URI
-	actionURI, err := discoverUpdateServiceActionWithBackoff(ctx, res.Spec.TargetAddress, creds.Username, creds.Password)
+	// Select the device profile that matches this target. A firmware update must
+	// not proceed without a profile, so a no-match is a terminal failure.
+	profile, err := deviceProfiles.MatchDevice(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, deviceProfiles.Global)
 	if err != nil {
-		if isTerminalError(err) {
-			res.Status.JobState = "Failed"
-			res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
-			if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-				return fmt.Errorf("set terminal failure after UpdateService discovery error: %w", updateErr)
-			}
-			return nil
-		}
-
-		res.Status.ErrorDetail = fmt.Sprintf("auto-discovery of UpdateService failed: %v", err)
 		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = "no matching device profile"
 		if updateErr := r.UpdateStatus(ctx, res); updateErr != nil {
-			return fmt.Errorf("persist exhausted UpdateService discovery transient error as failed: %w", updateErr)
+			return fmt.Errorf("set terminal failure after device profile match error: %w", updateErr)
 		}
 		return nil
 	}
+	res.Status.DeviceProfileID = profile.Spec.ProfileID
+	r.Logger.Infof("FirmwareUpdateJob %s selected device profile %q", res.GetUID(), profile.Spec.ProfileID)
 
-	r.Logger.Debugf("FirmwareUpdateJob %s discovered UpdateService action URI: %s", res.GetUID(), actionURI)
+	// The device profile supplies the Redfish update action URI and HTTP method.
+	actionURI := profile.Spec.UpdateActionURI
+	r.Logger.Debugf("FirmwareUpdateJob %s using UpdateService action URI from profile: %s", res.GetUID(), actionURI)
 
 	// If Component is specified and Targets is empty, discover targets from FirmwareInventory
 	if res.Spec.Component != "" && len(res.Spec.Targets) == 0 {
@@ -196,7 +193,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
 	}
 
-	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, proxyURI, actionURI)
+	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, proxyURI, actionURI, profile)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -389,12 +386,12 @@ func discoverTargetsFromInventoryWithBackoff(ctx context.Context, targetAddress,
 	return nil, lastErr
 }
 
-func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string) (string, error) {
+func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string, profile v1.DeviceProfile) (string, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		taskID, err := dispatchRedfishOnce(ctx, res, creds, proxyURI, actionURI)
+		taskID, err := dispatchRedfishOnce(ctx, res, creds, proxyURI, actionURI, profile)
 		if err == nil {
 			return taskID, nil
 		}
@@ -413,21 +410,31 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 	return "", lastErr
 }
 
-func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string) (string, error) {
-	payload := map[string]interface{}{
-		"ImageURI":         proxyURI,
-		"Targets":          res.Spec.Targets,
-		"TransferProtocol": "HTTP",
+func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string, profile v1.DeviceProfile) (string, error) {
+	// Build the request body from the device profile's payload template.
+	target := ""
+	if len(res.Spec.Targets) > 0 {
+		target = res.Spec.Targets[0]
 	}
-	body, err := json.Marshal(payload)
+	subs := map[string]string{
+		"imageURI":  proxyURI,
+		"target":    target,
+		"component": res.Spec.Component,
+	}
+	body, err := deviceProfiles.BuildUpdatePayload(profile, subs)
 	if err != nil {
-		return "", fmt.Errorf("marshal Redfish SimpleUpdate body: %w", err)
+		return "", fmt.Errorf("build Redfish update payload from device profile %q: %w", profile.Spec.ProfileID, err)
 	}
 
 	// Construct the full endpoint URL if actionURI is a relative path
 	endpoint := resolveRedfishEndpoint(res.Spec.TargetAddress, actionURI)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	method := profile.Spec.UpdateMethod
+	if method == "" {
+		method = http.MethodPost
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", fmt.Errorf("build Redfish SimpleUpdate request: %w", err)
 	}

@@ -64,6 +64,75 @@ func registerCustomOpenAPIPaths(spec *openapi3.T) {
 	op.Parameters = append(op.Parameters, &openapi3.ParameterRef{Value: digestParam})
 
 	spec.Paths.Set("/firmware-proxy/layer/{digest}", &openapi3.PathItem{Get: op})
+
+	registerDeviceProfileOpenAPIPaths(spec)
+}
+
+// registerDeviceProfileOpenAPIPaths adds the /deviceprofiles endpoints to the
+// served OpenAPI spec.
+func registerDeviceProfileOpenAPIPaths(spec *openapi3.T) {
+	const tag = "Device Profiles"
+
+	newOp := func(id, summary string, codes map[string]string) *openapi3.Operation {
+		o := openapi3.NewOperation()
+		o.OperationID = id
+		o.Summary = summary
+		o.Tags = []string{tag}
+		o.Responses = openapi3.NewResponses()
+		for code, desc := range codes {
+			o.Responses.Set(code, &openapi3.ResponseRef{
+				Value: openapi3.NewResponse().WithDescription(desc),
+			})
+		}
+		return o
+	}
+
+	idParam := func() *openapi3.ParameterRef {
+		p := openapi3.NewPathParameter("id")
+		p.Description = "Device profile ID (matches [a-z0-9_-]+)"
+		p.Required = true
+		p.Schema = &openapi3.SchemaRef{Value: openapi3.NewStringSchema()}
+		return &openapi3.ParameterRef{Value: p}
+	}
+
+	// Collection endpoints.
+	listOp := newOp("listDeviceProfiles", "List all device profiles", map[string]string{
+		"200": "List of device profiles",
+	})
+	createOp := newOp("createDeviceProfile", "Create a new device profile", map[string]string{
+		"201": "Device profile created",
+		"400": "Invalid device profile",
+		"409": "Device profile ID already exists",
+	})
+	spec.Paths.Set("/deviceprofiles", &openapi3.PathItem{Get: listOp, Post: createOp})
+
+	// Reload endpoint.
+	reloadOp := newOp("reloadDeviceProfiles", "Rescan the device profiles directory", map[string]string{
+		"200": "Reload summary",
+	})
+	spec.Paths.Set("/deviceprofiles/reload", &openapi3.PathItem{Post: reloadOp})
+
+	// Item endpoints.
+	getOp := newOp("getDeviceProfile", "Get a device profile by ID", map[string]string{
+		"200": "Device profile",
+		"404": "Device profile not found",
+	})
+	putOp := newOp("replaceDeviceProfile", "Replace a device profile", map[string]string{
+		"200": "Device profile replaced",
+		"400": "Invalid device profile",
+	})
+	patchOp := newOp("patchDeviceProfile", "Partially update a device profile", map[string]string{
+		"200": "Device profile updated",
+		"400": "Invalid device profile",
+		"404": "Device profile not found",
+	})
+	deleteOp := newOp("deleteDeviceProfile", "Delete a device profile", map[string]string{
+		"204": "Device profile deleted",
+		"404": "Device profile not found",
+	})
+	item := &openapi3.PathItem{Get: getOp, Put: putOp, Patch: patchOp, Delete: deleteOp}
+	item.Parameters = openapi3.Parameters{idParam()}
+	spec.Paths.Set("/deviceprofiles/{id}", item)
 }
 
 func registerFirmwareProxyRoute(r chi.Router) {

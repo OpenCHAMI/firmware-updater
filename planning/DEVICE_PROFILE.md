@@ -33,7 +33,7 @@ The table below summarizes the known variants the profile system must accommodat
 |---------------------------|--------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|---------------------------------------------------------|
 | Standard (DMTF)           | `/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate`                 | `ImageURI`, `TransferProtocol`, `Targets[]`                                          | Baseline; used by most modern BMCs                      |
 | HPE iLO 5 / iLO 6        | `/redfish/v1/UpdateService/Actions/SimpleUpdate`                               | `ImageURI`                                                                           | Uses shorter action name; `Targets` ignored             |
-| HPE Cray EX (liquid-cooled)| `/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate`                | `ImageURI`, `TransferProtocol`, `Targets[]`                                          | Targets must reference FirmwareInventory URIs           |
+| HPE Cray EX (liquid-cooled)| `/redfish/v1/UpdateService/Actions/SimpleUpdate`                | `ImageURI`, `TransferProtocol`, `Targets[]`                                          | Targets must reference FirmwareInventory URIs           |
 | Dell iDRAC                | `/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate`                 | `ImageURI`, `TransferProtocol`, `Targets[]`, optionally `ApplyTime`                  | Creates a Redfish Job; task URI returned in `Location`  |
 | Dell iDRAC (multipart)    | `POST /redfish/v1/UpdateService/upload`                                        | Multipart form with `file` part                                                      | Alternative path for direct binary push                 |
 | Lenovo XCC                | `/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate`                 | `ImageURI`, `TransferProtocol`, optionally `Targets[]`                               | Targets may be empty; XCC selects component itself      |
@@ -139,7 +139,7 @@ enabled: true
 
 # Full action URI.  May be absolute or relative (relative is resolved against
 # "https://<targetAddress>").
-updateActionURI: /redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate
+updateActionURI: /redfish/v1/UpdateService/Actions/SimpleUpdate
 
 # JSON template for the POST body.  Use %placeholder% tokens.
 # Required keys: imageURI.  Optional: targets, transferProtocol, applyTime.
