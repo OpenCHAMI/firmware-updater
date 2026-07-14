@@ -295,6 +295,86 @@ podman run --replace \
 
 Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
 
+### 4.1 Migrating from Ansible Vault
+
+If you currently manage BMC credentials using Ansible Vault, you can automate the migration of those credentials into the `secrets.json` format required by the firmware updater. 
+
+This process requires an Ansible Vault YAML file containing a list of credentials, for example:
+
+```yaml
+bmc_credentials:
+  - id: "x9000-bmc"
+    username: "root"
+    password: "initial0"
+
+```
+
+You can extract these secrets using either an Ansible Playbook or a bash script.
+
+#### Option A: Ansible Playbook
+
+Run an Ansible Playbook that iterates through the vaulted list and executes `secret-cli` locally.
+
+1. Save the following playbook as `migrate_secrets.yml` (or locate it in the `scripts/`):
+
+```yaml
+- name: Migrate Ansible Vault secrets to Magellan secrets.json
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vaulted_secrets.yml
+
+  tasks:
+    - name: Ensure MASTER_KEY is set in the environment
+      ansible.builtin.fail:
+        msg: "MASTER_KEY environment variable is missing or invalid length. Must be 64 characters."
+      when: lookup('env', 'MASTER_KEY') | length != 64
+
+    - name: Run secret-cli for each credential
+      ansible.builtin.command:
+        cmd: >
+          go run ./cmd/secret-cli 
+          --secret-id {{ item.id }} 
+          --username {{ item.username }} 
+          --password {{ item.password }} 
+          --store-path ./secrets.json
+      environment:
+        MASTER_KEY: "{{ lookup('env', 'MASTER_KEY') }}"
+      loop: "{{ bmc_credentials }}"
+      no_log: true
+```
+
+2. Execute the playbook, providing your vault password when prompted:
+
+```bash
+export MASTER_KEY="$(openssl rand -hex 32)"
+ansible-playbook --ask-vault-pass migrate_secrets.yml
+
+```
+
+#### Option B: Bash Script (using yq)
+
+Alternatively, use `ansible-vault view` to stream the decrypted YAML to standard output and parse it with `yq`:
+
+```bash
+#!/bin/bash
+
+if [[ ${#MASTER_KEY} -ne 64 ]]; then
+    echo "Error: MASTER_KEY environment variable must be a 64-character hex string."
+    exit 1
+fi
+
+ansible-vault view vaulted_secrets.yml | yq e '.bmc_credentials[] | .id + " " + .username + " " + .password' - | \
+while read -r id username password; do
+    go run ./cmd/secret-cli \
+        --secret-id "$id" \
+        --username "$username" \
+        --password "$password" \
+        --store-path "./secrets.json"
+done
+```
+
 Notes:
 - Registry auth is optional; see [section 5](#5-how-to-configure-registry-authentication) for details.
 - Secret value content is JSON containing non-empty `username` and `password`.
