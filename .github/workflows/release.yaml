@@ -57,7 +57,7 @@ jobs:
           echo "IS_PR_BUILD=false" >> $GITHUB_ENV
 
       - name: Release with goreleaser
-        uses: goreleaser/goreleaser-action@v7.2.2
+        uses: goreleaser/goreleaser-action@v7.2.3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
