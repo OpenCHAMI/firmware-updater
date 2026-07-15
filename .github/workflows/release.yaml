@@ -85,12 +85,12 @@ jobs:
           echo "digest=$(cat digest.txt)" >> $GITHUB_OUTPUT
 
       - name: Attest Binaries
-        uses: actions/attest-build-provenance@v4.1.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-path: dist/**/firmware-updater*
 
       - name: generate build provenance
-        uses: actions/attest-build-provenance@v4.1.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-name: ghcr.io/openchami/firmware-updater
           subject-digest: ${{ steps.process_goreleaser_output.outputs.digest }}
