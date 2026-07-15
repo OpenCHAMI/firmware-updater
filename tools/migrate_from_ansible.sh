@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 if [[ ${#MASTER_KEY} -ne 64 ]]; then
     echo "Error: MASTER_KEY environment variable must be a 64-character hex string."

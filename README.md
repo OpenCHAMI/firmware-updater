@@ -299,8 +299,7 @@ Note: if you want SQLite data to persist across container replacement, use a hos
 
 If you currently manage BMC credentials using Ansible Vault, you can automate the migration of those credentials into the `secrets.json` format required by the firmware updater. 
 
-This process requires an Ansible Vault YAML file containing a list of credentials, for example:
-
+This process requires an Ansible Vault YAML file containing a list of credentials. Save this file as `vaulted_secrets.yml` in the `tools/` directory, formatted as follows:
 ```yaml
 bmc_credentials:
   - id: "x9000-bmc"
@@ -333,16 +332,22 @@ Run an Ansible Playbook that iterates through the vaulted list and executes `sec
 
     - name: Run secret-cli for each credential
       ansible.builtin.command:
-        cmd: >
-          go run ./cmd/secret-cli 
-          --secret-id {{ item.id }} 
-          --username {{ item.username }} 
-          --password {{ item.password }} 
-          --store-path ./secrets.json
+        argv:
+          - go
+          - run
+          - ./cmd/secret-cli
+          - --secret-id
+          - "{{ item.id }}"
+          - --username
+          - "{{ item.username }}"
+          - --password
+          - "{{ item.password }}"
+          - --store-path
+          - ./secrets.json
+        chdir: "{{ playbook_dir }}/.."
       environment:
         MASTER_KEY: "{{ lookup('env', 'MASTER_KEY') }}"
       loop: "{{ bmc_credentials }}"
-      no_log: true
 ```
 
 2. Execute the playbook, providing your vault password when prompted:
@@ -359,6 +364,7 @@ Alternatively, use `ansible-vault view` to stream the decrypted YAML to standard
 
 ```bash
 #!/bin/bash
+set -euo pipefail
 
 if [[ ${#MASTER_KEY} -ne 64 ]]; then
     echo "Error: MASTER_KEY environment variable must be a 64-character hex string."
