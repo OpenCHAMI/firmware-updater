@@ -33,3 +33,16 @@ data/
 *~
 
 secrets.json
+
+# macOS metadata
+.DS_Store
+
+# Local scratch artifacts
+.tmp/
+asd/
+mock_redfish_server
+dummy.bin
+
+# Local vault migration input
+tools/vaulted_secrets.yml
+tools/vaulted_secrets.local.yml
