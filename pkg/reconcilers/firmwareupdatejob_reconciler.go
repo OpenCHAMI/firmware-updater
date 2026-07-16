@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 	"github.com/user/firmware-updater/internal/secretsruntime"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 	"github.com/user/firmware-updater/pkg/redfish"
+	"github.com/user/firmware-updater/pkg/semverutil"
 	"golang.org/x/mod/semver"
 )
 
@@ -497,7 +497,7 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds b
 		"TransferProtocol": "HTTP",
 	}
 
-	client := redfish.NewClient(res.Spec.TargetAddress, creds.Username, creds.Password)
+	client := newRedfishClient(res.Spec.TargetAddress, creds.Username, creds.Password)
 	body, headers, _, err := client.PostJSON(ctx, actionURI, payload)
 	if err != nil {
 		return "", err
@@ -533,15 +533,26 @@ var (
 	redfishLongPollMaxDuration = 30 * time.Minute
 	redfishLongPollMinInterval = 15 * time.Second
 	redfishLongPollMaxInterval = 30 * time.Second
-	semverTokenPattern         = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
 )
 
 func pollRedfishTaskWithBackoff(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
-	deadline := time.Now().Add(redfishLongPollMaxDuration)
+	pollCtx, cancel := context.WithTimeout(ctx, redfishLongPollMaxDuration)
+	defer cancel()
+
 	var lastErr error
 
-	for attempt := 1; time.Now().Before(deadline); attempt++ {
-		observation, err := pollRedfishTaskOnce(ctx, targetAddress, username, password, taskID)
+	for attempt := 1; ; attempt++ {
+		if doneErr := pollCtx.Err(); doneErr != nil {
+			if lastErr != nil {
+				return redfishTaskObservation{}, lastErr
+			}
+			if errors.Is(doneErr, context.DeadlineExceeded) {
+				return redfishTaskObservation{}, fmt.Errorf("timed out waiting for Redfish task %q", strings.TrimSpace(taskID))
+			}
+			return redfishTaskObservation{}, doneErr
+		}
+
+		observation, err := pollRedfishTaskOnce(pollCtx, targetAddress, username, password, taskID)
 		if err != nil {
 			lastErr = err
 			if isTerminalError(err) {
@@ -556,16 +567,10 @@ func pollRedfishTaskWithBackoff(ctx context.Context, targetAddress, username, pa
 			}
 		}
 
-		if waitErr := sleepWithContext(ctx, redfishLongPollInterval(attempt)); waitErr != nil {
+		if waitErr := sleepWithContext(pollCtx, redfishLongPollInterval(attempt)); waitErr != nil {
 			return redfishTaskObservation{}, waitErr
 		}
 	}
-
-	if lastErr != nil {
-		return redfishTaskObservation{}, lastErr
-	}
-
-	return redfishTaskObservation{}, fmt.Errorf("timed out waiting for Redfish task %q", strings.TrimSpace(taskID))
 }
 
 func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
@@ -629,11 +634,23 @@ type redfishInventoryVerification struct {
 }
 
 func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
-	deadline := time.Now().Add(redfishLongPollMaxDuration)
+	pollCtx, cancel := context.WithTimeout(ctx, redfishLongPollMaxDuration)
+	defer cancel()
+
 	var lastErr error
 
-	for attempt := 1; time.Now().Before(deadline); attempt++ {
-		verification, err := verifyFirmwareTargetsUpdatedOnce(ctx, res, creds)
+	for attempt := 1; ; attempt++ {
+		if doneErr := pollCtx.Err(); doneErr != nil {
+			if lastErr != nil {
+				return redfishInventoryVerification{}, lastErr
+			}
+			if errors.Is(doneErr, context.DeadlineExceeded) {
+				return redfishInventoryVerification{}, fmt.Errorf("timed out verifying Redfish firmware inventory update")
+			}
+			return redfishInventoryVerification{}, doneErr
+		}
+
+		verification, err := verifyFirmwareTargetsUpdatedOnce(pollCtx, res, creds)
 		if err != nil {
 			lastErr = err
 			if isTerminalError(err) {
@@ -645,16 +662,10 @@ func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.Firmwa
 			}
 		}
 
-		if waitErr := sleepWithContext(ctx, redfishLongPollInterval(attempt)); waitErr != nil {
+		if waitErr := sleepWithContext(pollCtx, redfishLongPollInterval(attempt)); waitErr != nil {
 			return redfishInventoryVerification{}, waitErr
 		}
 	}
-
-	if lastErr != nil {
-		return redfishInventoryVerification{}, lastErr
-	}
-
-	return redfishInventoryVerification{}, fmt.Errorf("timed out verifying Redfish firmware inventory update")
 }
 
 func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
@@ -744,7 +755,7 @@ func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
 }
 
 func getRedfishJSON(ctx context.Context, targetAddress, username, password, uri string) (map[string]interface{}, int, error) {
-	client := redfish.NewClient(targetAddress, username, password)
+	client := newRedfishClient(targetAddress, username, password)
 	return client.GetJSON(ctx, uri)
 }
 
@@ -922,13 +933,13 @@ func isTerminalError(err error) bool {
 
 // discoverUpdateServiceAction queries the UpdateService endpoint and returns the SimpleUpdate action URI
 func discoverUpdateServiceAction(ctx context.Context, targetAddress, username, password string) (string, error) {
-	client := redfish.NewClient(targetAddress, username, password)
+	client := newRedfishClient(targetAddress, username, password)
 	return client.DiscoverUpdateServiceAction(ctx)
 }
 
 // discoverTargetsFromInventory queries FirmwareInventory and returns targets matching the component
 func discoverTargetsFromInventory(ctx context.Context, targetAddress, username, password, component string) ([]string, error) {
-	client := redfish.NewClient(targetAddress, username, password)
+	client := newRedfishClient(targetAddress, username, password)
 	return client.DiscoverTargetsFromInventory(ctx, component)
 }
 
@@ -941,46 +952,17 @@ func redfishLongPollInterval(attempt int) time.Duration {
 }
 
 func versionsSemanticallyEqual(installedVersion, resolvedVersion string) bool {
-	installedNormalized, ok := normalizeSemver(installedVersion)
+	installedNormalized, ok := semverutil.NormalizeComparableSemver(installedVersion)
 	if !ok {
 		return false
 	}
 
-	resolvedNormalized, ok := normalizeSemver(resolvedVersion)
+	resolvedNormalized, ok := semverutil.NormalizeComparableSemver(resolvedVersion)
 	if !ok {
 		return false
 	}
 
 	return semver.Compare(installedNormalized, resolvedNormalized) == 0
-}
-
-func normalizeSemver(raw string) (string, bool) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", false
-	}
-
-	if normalized, ok := canonicalizeSemverCandidate(trimmed); ok {
-		return normalized, true
-	}
-
-	token := semverTokenPattern.FindString(trimmed)
-	if token == "" {
-		return "", false
-	}
-
-	return canonicalizeSemverCandidate(token)
-}
-
-func canonicalizeSemverCandidate(candidate string) (string, bool) {
-	withPrefix := candidate
-	if !strings.HasPrefix(withPrefix, "v") {
-		withPrefix = "v" + withPrefix
-	}
-	if !semver.IsValid(withPrefix) {
-		return "", false
-	}
-	return semver.Canonical(withPrefix), true
 }
 
 func loadBMCCredentials(secretID string) (bmcCredentials, error) {

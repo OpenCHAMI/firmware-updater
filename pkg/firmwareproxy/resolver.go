@@ -7,13 +7,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/user/firmware-updater/pkg/semverutil"
 	"golang.org/x/mod/semver"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry"
@@ -68,7 +68,6 @@ type authConfig struct {
 var payloadIndex sync.Map
 var authState sync.RWMutex
 var globalAuthConfig authConfig
-var semverSubstringPattern = regexp.MustCompile(`v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?`)
 
 // InitAuth configures global OCI registry credentials used by ORAS remote repositories.
 func InitAuth(username, password string) {
@@ -344,30 +343,11 @@ func sortManifestCandidates(candidates []manifestCandidate) {
 }
 
 func normalizeSemver(version string) (string, bool) {
-	v := strings.TrimSpace(version)
-	if v == "" {
-		return "", false
-	}
-	if !strings.HasPrefix(v, "v") {
-		v = "v" + v
-	}
-	if !semver.IsValid(v) {
-		return "", false
-	}
-	return v, true
+	return semverutil.NormalizeSemverCandidate(version)
 }
 
 func normalizeComparableVersion(version string) (string, bool) {
-	if normalized, ok := normalizeSemver(version); ok {
-		return normalized, true
-	}
-
-	match := semverSubstringPattern.FindString(strings.TrimSpace(version))
-	if match == "" {
-		return "", false
-	}
-
-	return normalizeSemver(match)
+	return semverutil.NormalizeComparableSemver(version)
 }
 
 func isCompatibleHardware(compatibilityAnnotation, hardwareModel string) bool {

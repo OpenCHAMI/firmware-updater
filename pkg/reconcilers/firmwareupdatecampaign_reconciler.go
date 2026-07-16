@@ -19,7 +19,6 @@ import (
 	"github.com/openchami/fabrica/pkg/resource"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
-	"github.com/user/firmware-updater/pkg/redfish"
 )
 
 var campaignNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9-]`)
@@ -399,7 +398,7 @@ func discoverInventoryComponentsWithBackoff(ctx context.Context, targetAddress, 
 }
 
 func discoverInventoryComponents(ctx context.Context, targetAddress, username, password string) ([]inventoryComponent, error) {
-	client := redfish.NewClient(targetAddress, username, password)
+	client := newRedfishClient(targetAddress, username, password)
 	inventory, _, err := client.GetJSON(ctx, "/redfish/v1/UpdateService/FirmwareInventory")
 	if err != nil {
 		return nil, err

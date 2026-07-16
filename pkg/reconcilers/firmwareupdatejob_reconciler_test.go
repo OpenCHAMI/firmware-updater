@@ -3,6 +3,7 @@ package reconcilers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -286,6 +287,56 @@ func TestVersionsSemanticallyEqualStrictComparison(t *testing.T) {
 	}
 	if versionsSemanticallyEqual("1.20.0", "1.2.0") {
 		t.Fatal("expected versions to differ")
+	}
+}
+
+func TestVersionsSemanticallyEqualTwoComponentVersions(t *testing.T) {
+	if !versionsSemanticallyEqual("1.2", "1.2.0") {
+		t.Fatal("expected two-component and three-component versions to match")
+	}
+	if versionsSemanticallyEqual("1.2", "1.3") {
+		t.Fatal("expected two-component versions to differ")
+	}
+	if !versionsSemanticallyEqual("nc.1.2", "1.2.0") {
+		t.Fatal("expected vendor-prefixed two-component version to normalize")
+	}
+}
+
+func TestVerifyFirmwareTargetsUpdatedWithBackoffRespectsParentContextTimeout(t *testing.T) {
+	ensureTestSecretStore(t)
+	configureFastPollingForTests(t)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		if strings.HasSuffix(r.URL.Path, "/A") {
+			respondTestJSON(t, w, map[string]interface{}{
+				"Version": "1.0.0",
+			})
+			return
+		}
+		respondTestJSON(t, w, map[string]interface{}{})
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	res := &v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			Targets:       []string{"/redfish/v1/UpdateService/FirmwareInventory/A"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			ResolvedVersion: "1.2.0",
+		},
+	}
+
+	verification, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, res, bmcCredentials{Username: "root", Password: "initial0"})
+	if err == nil {
+		t.Fatalf("expected timeout error, got verification: %+v", verification)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
 	}
 }
 

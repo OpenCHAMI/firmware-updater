@@ -42,6 +42,22 @@ func TestSelectManifestCandidateExactVersion(t *testing.T) {
 	}
 }
 
+func TestSelectManifestCandidateExactTwoComponentVersion(t *testing.T) {
+	candidates := []manifestCandidate{
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+	}
+
+	selected, err := selectManifestCandidate(candidates, "1.2")
+	if err != nil {
+		t.Fatalf("selectManifestCandidate returned error: %v", err)
+	}
+
+	if selected.tag != "tag-a" {
+		t.Fatalf("expected tag-a, got %s", selected.tag)
+	}
+}
+
 func TestSelectManifestCandidateInvalidTarget(t *testing.T) {
 	candidates := []manifestCandidate{
 		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
@@ -83,6 +99,24 @@ func TestSelectNewerManifestCandidateNoUpdateNeeded(t *testing.T) {
 	}
 	if updateAvailable {
 		t.Fatalf("expected no update to be available")
+	}
+}
+
+func TestSelectNewerManifestCandidateTwoComponentInstalledVersion(t *testing.T) {
+	candidates := []manifestCandidate{
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+	}
+
+	selected, updateAvailable, err := selectNewerManifestCandidate(candidates, "1.2")
+	if err != nil {
+		t.Fatalf("selectNewerManifestCandidate returned error: %v", err)
+	}
+	if !updateAvailable {
+		t.Fatalf("expected update to be available")
+	}
+	if selected.tag != "tag-b" {
+		t.Fatalf("expected tag-b, got %s", selected.tag)
 	}
 }
 

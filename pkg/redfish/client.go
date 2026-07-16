@@ -56,13 +56,28 @@ type Client struct {
 	httpClient    *http.Client
 }
 
+const DefaultHTTPTimeout = 20 * time.Second
+
+type ClientOptions struct {
+	Timeout time.Duration
+}
+
 func NewClient(targetAddress, username, password string) *Client {
+	return NewClientWithOptions(targetAddress, username, password, ClientOptions{})
+}
+
+func NewClientWithOptions(targetAddress, username, password string, options ClientOptions) *Client {
+	timeout := options.Timeout
+	if timeout <= 0 {
+		timeout = DefaultHTTPTimeout
+	}
+
 	return &Client{
 		targetAddress: strings.TrimSpace(targetAddress),
 		username:      username,
 		password:      password,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			},
