@@ -11,7 +11,7 @@ require (
 	github.com/OpenCHAMI/magellan v0.5.1
 	github.com/getkin/kin-openapi v0.139.0
 	github.com/go-chi/chi/v5 v5.1.0
-	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/mattn/go-sqlite3 v1.14.48
 	github.com/openchami/fabrica v0.4.7
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
