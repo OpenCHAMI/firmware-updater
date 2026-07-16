@@ -181,6 +181,54 @@ func TestReconcileFirmwareUpdateJobIgnoresInventoryWarning(t *testing.T) {
 	}
 }
 
+func TestReconcileFirmwareUpdateJobFailsOnInventoryWarningDownloadFailed(t *testing.T) {
+	configureFastPollingForTests(t)
+	ensureTestSecretStore(t)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		if r.URL.Path != "/redfish/v1/UpdateService/FirmwareInventory/BMC" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		respondTestJSON(t, w, map[string]interface{}{
+			"Version": "nc.1.10.3-24-shasta-release.arm",
+			"Status": map[string]interface{}{
+				"Health": "Warning",
+				"Conditions": []map[string]interface{}{{
+					"Message":   "Firmware package download failed.",
+					"MessageId": "HPEFirmwareUpdate.1.0.DownloadFailed",
+					"Severity":  "Warning",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	job := v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			SecretID:      "test-secret",
+			Targets:       []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			JobState: "InProgress",
+		},
+	}
+
+	reconciler := &FirmwareUpdateJobReconciler{}
+	if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
+		t.Fatalf("reconcileFirmwareUpdateJob returned error: %v", err)
+	}
+
+	if job.Status.JobState != "Failed" {
+		t.Fatalf("expected Failed, got %q", job.Status.JobState)
+	}
+	detailLower := strings.ToLower(job.Status.ErrorDetail)
+	if !strings.Contains(detailLower, "downloadfailed") && !strings.Contains(detailLower, "download failed") {
+		t.Fatalf("expected error detail to include download failure context, got %q", job.Status.ErrorDetail)
+	}
+}
+
 func TestReconcileFirmwareUpdateJobIncludesStructuredRedfishErrorDetail(t *testing.T) {
 	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)

@@ -591,6 +591,9 @@ func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password,
 		if taskStatus == "critical" {
 			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
 		}
+		if taskStatus == "warning" && redfishTaskHasFailureMessage(body) {
+			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
 		if taskStatus == "warning" && redfishTaskHasTransitionalWarning(body) {
 			return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
 		}
@@ -607,6 +610,9 @@ func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password,
 			return redfishTaskObservation{State: redfishTaskStateCompleted, Detail: detail}, nil
 		}
 		if taskStatus == "critical" {
+			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		if taskStatus == "warning" && redfishTaskHasFailureMessage(body) {
 			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
 		}
 		if taskStatus == "warning" && redfishTaskHasTransitionalWarning(body) {
@@ -712,13 +718,20 @@ func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
 				continue
 			}
 			severity := strings.ToLower(strings.TrimSpace(asString(condition["Severity"])))
-			if severity == "critical" || health == "critical" {
+			messageID := strings.TrimSpace(asString(condition["MessageId"]))
+			message := strings.TrimSpace(asString(condition["Message"]))
+			resolution := strings.TrimSpace(asString(condition["Resolution"]))
+			if severity == "critical" || health == "critical" || redfishMessageLooksFailed(messageID, message) {
 				for _, key := range []string{"Message", "MessageId", "Resolution"} {
 					if detail := strings.TrimSpace(asString(condition[key])); detail != "" {
 						return true, detail
 					}
 				}
 				return true, fmt.Sprintf("Redfish inventory reported %s condition", severity)
+			}
+
+			if severity == "warning" && redfishMessageLooksTransitional(messageID, message, resolution) {
+				continue
 			}
 		}
 	}
@@ -816,16 +829,55 @@ func redfishTaskHasTransitionalWarning(body map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		messageID := strings.ToLower(strings.TrimSpace(asString(messageMap["MessageId"])))
-		message := strings.ToLower(strings.TrimSpace(asString(messageMap["Message"])))
-		combined := messageID + " " + message
-		for _, token := range []string{"pendingreboot", "reboot", "resetrequired", "restartrequired", "pending"} {
-			if strings.Contains(combined, token) {
-				return true
-			}
+		messageID := strings.TrimSpace(asString(messageMap["MessageId"]))
+		message := strings.TrimSpace(asString(messageMap["Message"]))
+		resolution := strings.TrimSpace(asString(messageMap["Resolution"]))
+		if redfishMessageLooksTransitional(messageID, message, resolution) {
+			return true
 		}
 	}
 
+	return false
+}
+
+func redfishTaskHasFailureMessage(body map[string]interface{}) bool {
+	messages, ok := body["Messages"].([]interface{})
+	if !ok {
+		return false
+	}
+
+	for _, raw := range messages {
+		messageMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		messageID := strings.TrimSpace(asString(messageMap["MessageId"]))
+		message := strings.TrimSpace(asString(messageMap["Message"]))
+		if redfishMessageLooksFailed(messageID, message) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func redfishMessageLooksFailed(messageID, message string) bool {
+	combined := strings.ToLower(strings.TrimSpace(messageID + " " + message))
+	for _, token := range []string{"fail", "error", "critical", "timeout", "aborted", "exception", "downloadfailed", "transferfailed", "verificationfailed"} {
+		if strings.Contains(combined, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func redfishMessageLooksTransitional(messageID, message, resolution string) bool {
+	combined := strings.ToLower(strings.TrimSpace(messageID + " " + message + " " + resolution))
+	for _, token := range []string{"pendingreboot", "reboot", "resetrequired", "restartrequired", "pending", "inprogress", "try again after restart"} {
+		if strings.Contains(combined, token) {
+			return true
+		}
+	}
 	return false
 }
 
