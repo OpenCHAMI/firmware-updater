@@ -45,20 +45,19 @@ docker run -d \
 
 ### Redfish Timeout Tuning
 
-The Redfish HTTP client timeout defaults to `20s`. You can tune it at server startup:
-
-```bash
-go run ./cmd/server serve \
-  --redfish-http-timeout 25 \
-  --port 8090 \
-  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
-  --secrets-file ./secrets.json
-```
-
-Equivalent environment variable:
+The Redfish HTTP client timeout defaults to `20s`. Configure it with an environment variable:
 
 ```bash
 export FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=25
+```
+
+Then start the server as usual:
+
+```bash
+go run ./cmd/server serve \
+  --port 8090 \
+  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
+  --secrets-file ./secrets.json
 ```
 
 Use higher values (for example `20-30s`) for slower BMCs or large inventory/action operations.

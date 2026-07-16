@@ -1,16 +1,27 @@
 package reconcilers
 
 import (
+	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/user/firmware-updater/pkg/redfish"
 )
 
+const redfishHTTPTimeoutEnvVar = "FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT"
+
 var configuredRedfishHTTPTimeoutNanos atomic.Int64
 
 func init() {
-	configuredRedfishHTTPTimeoutNanos.Store(int64(redfish.DefaultHTTPTimeout))
+	timeout := redfish.DefaultHTTPTimeout
+	if raw := strings.TrimSpace(os.Getenv(redfishHTTPTimeoutEnvVar)); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			timeout = time.Duration(seconds) * time.Second
+		}
+	}
+	configuredRedfishHTTPTimeoutNanos.Store(int64(timeout))
 }
 
 func SetRedfishHTTPTimeout(timeout time.Duration) {

@@ -19,9 +19,10 @@ go run ./cmd/secret-cli \
 ### 2) Start server
 
 ```bash
+export FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=20
+
 go run ./cmd/server serve \
   --port 8090 \
-  --redfish-http-timeout 20 \
   --database-url="file:hpc_test.db?cache=shared&_fk=1" \
   --secrets-file ./secrets.json
 ```
@@ -36,7 +37,7 @@ podman run --replace \
   -e MASTER_KEY="${MASTER_KEY}" \
   -e FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=20 \
   ghcr.io/openchami/firmware-updater:v0.6.2 \
-  serve --port 8090 --redfish-http-timeout 20 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
+  serve --port 8090 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
 ```
 
 Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
@@ -327,7 +328,6 @@ Notes:
 
 Redfish HTTP timeout configuration:
 - Default Redfish client timeout is 20 seconds.
-- Override via CLI: `--redfish-http-timeout <seconds>`.
 - Override via env: `FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=<seconds>`.
 - Use a higher value (for example 20-30 seconds) for slower BMCs or larger inventory/action operations.
 
