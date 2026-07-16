@@ -43,6 +43,26 @@ docker run -d \
 
 **Network Routing Requirement:** The service exposes an HTTP proxy on port `8090` by default. When an update job runs, the service instructs the physical hardware controller to download the firmware directly from this proxy. Therefore, the host running this Docker container must have an IP address (referred to as the `serverProxyAddress`) that is directly routable from the hardware management VLAN. If the hardware cannot reach this IP over port 8090, the update will time out.
 
+### Redfish Timeout Tuning
+
+The Redfish HTTP client timeout defaults to `20s`. You can tune it at server startup:
+
+```bash
+go run ./cmd/server serve \
+  --redfish-http-timeout 25 \
+  --port 8090 \
+  --database-url="file:hpc_test.db?cache=shared&_fk=1" \
+  --secrets-file ./secrets.json
+```
+
+Equivalent environment variable:
+
+```bash
+export FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=25
+```
+
+Use higher values (for example `20-30s`) for slower BMCs or large inventory/action operations.
+
 ## 3. Staging Firmware in the OCI Registry
 
 The service supports two operating methods: **Discovery Mode** and **Explicit Mode**.
@@ -57,6 +77,12 @@ Required parameters when pushing for Discovery Mode:
 * **Payload Type:** `application/vnd.openchami.firmware.payload.v1`
 * **Annotation 1:** `dev.fabrica.hardware.compatible` (The hardware model)
 * **Annotation 2:** `org.opencontainers.image.version` (The semantic version)
+
+Semantic version comparison behavior:
+
+* OCI annotation versions remain strict semantic versions.
+* Installed Redfish versions are normalized for comparison when possible.
+* Two-component versions such as `1.2` are padded to `1.2.0` during comparison.
 
 Push command example:
 

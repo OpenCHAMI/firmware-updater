@@ -21,6 +21,7 @@ go run ./cmd/secret-cli \
 ```bash
 go run ./cmd/server serve \
   --port 8090 \
+  --redfish-http-timeout 20 \
   --database-url="file:hpc_test.db?cache=shared&_fk=1" \
   --secrets-file ./secrets.json
 ```
@@ -33,8 +34,9 @@ podman run --replace \
   --name firmware-updater \
   -v "$(pwd)/secrets.json:/secrets.json:ro" \
   -e MASTER_KEY="${MASTER_KEY}" \
+  -e FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=20 \
   ghcr.io/openchami/firmware-updater:v0.6.2 \
-  serve --port 8090 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
+  serve --port 8090 --redfish-http-timeout 20 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"
 ```
 
 Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
@@ -323,6 +325,12 @@ Notes:
 - Credentials are runtime in-memory configuration only and are never persisted to API resources or the secrets file.
 - Avoid embedding credentials in shell history in production; prefer exporting from a secrets manager or sourcing from a file.
 
+Redfish HTTP timeout configuration:
+- Default Redfish client timeout is 20 seconds.
+- Override via CLI: `--redfish-http-timeout <seconds>`.
+- Override via env: `FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=<seconds>`.
+- Use a higher value (for example 20-30 seconds) for slower BMCs or larger inventory/action operations.
+
 ## 6. How To Update A Full Cabinet (Universal Campaign)
 
 Use a single campaign with:
@@ -406,6 +414,7 @@ Job states:
 4. Version comparison
 - OCI annotation versions are strict semver.
 - Installed Redfish version may include extended text; reconciler extracts semver substring when possible.
+- Two-component versions like `1.2` are normalized to `1.2.0` for comparison.
 - If installed version cannot be normalized, resolver treats newest compatible candidate as update-available.
 
 5. Repository structure strategy
