@@ -19,6 +19,7 @@ import (
 var installTestSecretStore sync.Once
 
 func TestReconcileFirmwareUpdateJobCompletesFromRedfishTask(t *testing.T) {
+	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +56,7 @@ func TestReconcileFirmwareUpdateJobCompletesFromRedfishTask(t *testing.T) {
 }
 
 func TestReconcileFirmwareUpdateJobFailsFromRedfishTask(t *testing.T) {
+	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +93,7 @@ func TestReconcileFirmwareUpdateJobFailsFromRedfishTask(t *testing.T) {
 }
 
 func TestReconcileFirmwareUpdateJobFallsBackToInventoryWhenTaskMissing(t *testing.T) {
+	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +103,7 @@ func TestReconcileFirmwareUpdateJobFallsBackToInventoryWhenTaskMissing(t *testin
 			http.NotFound(w, r)
 		case "/redfish/v1/UpdateService/FirmwareInventory/BMC":
 			respondTestJSON(t, w, map[string]interface{}{
-				"Version": "nc.1.10.2-build1",
+				"Version": "1.10.2",
 			})
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
@@ -131,7 +134,8 @@ func TestReconcileFirmwareUpdateJobFallsBackToInventoryWhenTaskMissing(t *testin
 	}
 }
 
-func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
+func TestReconcileFirmwareUpdateJobIgnoresInventoryWarning(t *testing.T) {
+	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +144,7 @@ func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		respondTestJSON(t, w, map[string]interface{}{
-			"Version": "nc.1.10.3-build1",
+			"Version": "1.10.3",
 			"Status": map[string]interface{}{
 				"Health": "Warning",
 				"Conditions": []map[string]interface{}{{
@@ -160,7 +164,55 @@ func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
 		},
 		Status: v1.FirmwareUpdateJobStatus{
 			JobState:        "InProgress",
-			ResolvedVersion: "1.10.2",
+			ResolvedVersion: "1.10.3",
+		},
+	}
+
+	reconciler := &FirmwareUpdateJobReconciler{}
+	if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
+		t.Fatalf("reconcileFirmwareUpdateJob returned error: %v", err)
+	}
+
+	if job.Status.JobState != "Completed" {
+		t.Fatalf("expected Completed, got %q", job.Status.JobState)
+	}
+	if job.Status.ErrorDetail != "" {
+		t.Fatalf("expected no error detail, got %q", job.Status.ErrorDetail)
+	}
+}
+
+func TestReconcileFirmwareUpdateJobIncludesStructuredRedfishErrorDetail(t *testing.T) {
+	configureFastPollingForTests(t)
+	ensureTestSecretStore(t)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{
+			"@odata.error": {
+				"code": "Base.1.0.GeneralError",
+				"message": "A general error has occurred.",
+				"@Message.ExtendedInfo": [
+					{
+						"MessageId": "UpdateService.1.0.ImageTransferProtocolNotSupported",
+						"Message": "The requested transfer protocol is not supported.",
+						"Resolution": "Use HTTPS for this BMC."
+					}
+				]
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	job := v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			SecretID:      "test-secret",
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			JobState: "InProgress",
+			TaskID:   "/redfish/v1/TaskService/Tasks/mock-task",
 		},
 	}
 
@@ -172,8 +224,20 @@ func TestReconcileFirmwareUpdateJobFailsFromInventoryWarning(t *testing.T) {
 	if job.Status.JobState != "Failed" {
 		t.Fatalf("expected Failed, got %q", job.Status.JobState)
 	}
-	if !strings.Contains(job.Status.ErrorDetail, "missing from firmware archive") {
-		t.Fatalf("expected inventory failure detail, got %q", job.Status.ErrorDetail)
+	if !strings.Contains(job.Status.ErrorDetail, "ImageTransferProtocolNotSupported") {
+		t.Fatalf("expected MessageId in error detail, got %q", job.Status.ErrorDetail)
+	}
+	if !strings.Contains(job.Status.ErrorDetail, "Use HTTPS for this BMC") {
+		t.Fatalf("expected Resolution in error detail, got %q", job.Status.ErrorDetail)
+	}
+}
+
+func TestVersionsSemanticallyEqualStrictComparison(t *testing.T) {
+	if !versionsSemanticallyEqual("1.2.0", "1.2.0") {
+		t.Fatal("expected versions to match")
+	}
+	if versionsSemanticallyEqual("1.20.0", "1.2.0") {
+		t.Fatal("expected versions to differ")
 	}
 }
 
@@ -270,6 +334,24 @@ func ensureTestSecretStore(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("SetStore failed: %v", err)
 		}
+	})
+}
+
+func configureFastPollingForTests(t *testing.T) {
+	t.Helper()
+
+	originalMaxDuration := redfishLongPollMaxDuration
+	originalMinInterval := redfishLongPollMinInterval
+	originalMaxInterval := redfishLongPollMaxInterval
+
+	redfishLongPollMaxDuration = 200 * time.Millisecond
+	redfishLongPollMinInterval = 5 * time.Millisecond
+	redfishLongPollMaxInterval = 10 * time.Millisecond
+
+	t.Cleanup(func() {
+		redfishLongPollMaxDuration = originalMaxDuration
+		redfishLongPollMinInterval = originalMinInterval
+		redfishLongPollMaxInterval = originalMaxInterval
 	})
 }
 

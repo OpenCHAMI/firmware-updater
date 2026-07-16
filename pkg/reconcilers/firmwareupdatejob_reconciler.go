@@ -8,12 +8,12 @@ package reconcilers
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +21,8 @@ import (
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/internal/secretsruntime"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
+	"github.com/user/firmware-updater/pkg/redfish"
+	"golang.org/x/mod/semver"
 )
 
 type bmcCredentials struct {
@@ -494,53 +496,19 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds b
 		"Targets":          res.Spec.Targets,
 		"TransferProtocol": "HTTP",
 	}
-	body, err := json.Marshal(payload)
+
+	client := redfish.NewClient(res.Spec.TargetAddress, creds.Username, creds.Password)
+	body, headers, _, err := client.PostJSON(ctx, actionURI, payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal Redfish SimpleUpdate body: %w", err)
-	}
-
-	// Construct the full endpoint URL if actionURI is a relative path
-	endpoint := resolveRedfishEndpoint(res.Spec.TargetAddress, actionURI)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return "", fmt.Errorf("build Redfish SimpleUpdate request: %w", err)
-	}
-	req.SetBasicAuth(creds.Username, creds.Password)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if isLikelyTransientNetworkError(err) {
-			return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
-		}
 		return "", err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
-		return "", &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
-		return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
-	}
-
-	taskID := strings.TrimSpace(resp.Header.Get("Location"))
+	taskID := strings.TrimSpace(headers.Get("Location"))
 	if taskID == "" {
-		var bodyObj map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&bodyObj); err == nil {
-			if v, ok := bodyObj["@odata.id"].(string); ok {
-				taskID = v
-			} else if v, ok := bodyObj["TaskID"].(string); ok {
-				taskID = v
-			}
+		if v, ok := body["@odata.id"].(string); ok {
+			taskID = strings.TrimSpace(v)
+		} else if v, ok := body["TaskID"].(string); ok {
+			taskID = strings.TrimSpace(v)
 		}
 	}
 
@@ -561,35 +529,50 @@ type redfishTaskObservation struct {
 	Detail string
 }
 
+var (
+	redfishLongPollMaxDuration = 30 * time.Minute
+	redfishLongPollMinInterval = 15 * time.Second
+	redfishLongPollMaxInterval = 30 * time.Second
+	semverTokenPattern         = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
+)
+
 func pollRedfishTaskWithBackoff(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
+	deadline := time.Now().Add(redfishLongPollMaxDuration)
 	var lastErr error
-	backoff := time.Second
 
-	for attempt := 1; attempt <= 4; attempt++ {
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
 		observation, err := pollRedfishTaskOnce(ctx, targetAddress, username, password, taskID)
-		if err == nil {
-			return observation, nil
+		if err != nil {
+			lastErr = err
+			if isTerminalError(err) {
+				return redfishTaskObservation{}, err
+			}
+		} else {
+			switch observation.State {
+			case redfishTaskStateRunning:
+				// Keep polling.
+			case redfishTaskStateCompleted, redfishTaskStateFailed, redfishTaskStateMissing:
+				return observation, nil
+			}
 		}
 
-		lastErr = err
-		if isTerminalError(err) || attempt == 4 {
-			break
-		}
-
-		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+		if waitErr := sleepWithContext(ctx, redfishLongPollInterval(attempt)); waitErr != nil {
 			return redfishTaskObservation{}, waitErr
 		}
-		backoff *= 2
 	}
 
-	return redfishTaskObservation{}, lastErr
+	if lastErr != nil {
+		return redfishTaskObservation{}, lastErr
+	}
+
+	return redfishTaskObservation{}, fmt.Errorf("timed out waiting for Redfish task %q", strings.TrimSpace(taskID))
 }
 
 func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
 	body, statusCode, err := getRedfishJSON(ctx, targetAddress, username, password, taskID)
 	if err != nil {
-		statusErr, ok := err.(*firmwareproxy.HTTPStatusError)
-		if ok && statusErr.StatusCode == http.StatusNotFound {
+		var statusErr *redfish.Error
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
 			return redfishTaskObservation{State: redfishTaskStateMissing}, nil
 		}
 		return redfishTaskObservation{}, err
@@ -605,8 +588,11 @@ func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password,
 
 	switch taskState {
 	case "completed":
-		if taskStatus == "critical" || taskStatus == "warning" {
+		if taskStatus == "critical" {
 			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		if taskStatus == "warning" && redfishTaskHasTransitionalWarning(body) {
+			return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
 		}
 		return redfishTaskObservation{State: redfishTaskStateCompleted, Detail: detail}, nil
 	case "exception", "killed", "cancelled", "canceled", "interrupted":
@@ -620,8 +606,11 @@ func pollRedfishTaskOnce(ctx context.Context, targetAddress, username, password,
 		if taskStatus == "ok" {
 			return redfishTaskObservation{State: redfishTaskStateCompleted, Detail: detail}, nil
 		}
-		if taskStatus == "critical" || taskStatus == "warning" {
+		if taskStatus == "critical" {
 			return redfishTaskObservation{State: redfishTaskStateFailed, Detail: detail}, nil
+		}
+		if taskStatus == "warning" && redfishTaskHasTransitionalWarning(body) {
+			return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
 		}
 		return redfishTaskObservation{State: redfishTaskStateRunning, Detail: detail}, nil
 	}
@@ -634,27 +623,32 @@ type redfishInventoryVerification struct {
 }
 
 func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
+	deadline := time.Now().Add(redfishLongPollMaxDuration)
 	var lastErr error
-	backoff := time.Second
 
-	for attempt := 1; attempt <= 4; attempt++ {
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
 		verification, err := verifyFirmwareTargetsUpdatedOnce(ctx, res, creds)
-		if err == nil {
-			return verification, nil
+		if err != nil {
+			lastErr = err
+			if isTerminalError(err) {
+				return redfishInventoryVerification{}, err
+			}
+		} else {
+			if verification.Failed || verification.Updated {
+				return verification, nil
+			}
 		}
 
-		lastErr = err
-		if isTerminalError(err) || attempt == 4 {
-			break
-		}
-
-		if waitErr := sleepWithContext(ctx, backoff); waitErr != nil {
+		if waitErr := sleepWithContext(ctx, redfishLongPollInterval(attempt)); waitErr != nil {
 			return redfishInventoryVerification{}, waitErr
 		}
-		backoff *= 2
 	}
 
-	return redfishInventoryVerification{}, lastErr
+	if lastErr != nil {
+		return redfishInventoryVerification{}, lastErr
+	}
+
+	return redfishInventoryVerification{}, fmt.Errorf("timed out verifying Redfish firmware inventory update")
 }
 
 func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
@@ -671,7 +665,7 @@ func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdat
 		return redfishInventoryVerification{}, nil
 	}
 
-	resolvedVersion := strings.ToLower(strings.TrimSpace(res.Status.ResolvedVersion))
+	resolvedVersion := strings.TrimSpace(res.Status.ResolvedVersion)
 
 	for _, target := range targets {
 		body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
@@ -686,8 +680,8 @@ func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdat
 
 		// Only evaluate version completion if a target version is known
 		if resolvedVersion != "" {
-			installedVersion := strings.ToLower(strings.TrimSpace(asString(body["Version"])))
-			if installedVersion == "" || !strings.Contains(installedVersion, resolvedVersion) {
+			installedVersion := strings.TrimSpace(asString(body["Version"]))
+			if installedVersion == "" || !versionsSemanticallyEqual(installedVersion, resolvedVersion) {
 				return redfishInventoryVerification{}, nil
 			}
 		} else {
@@ -718,7 +712,7 @@ func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
 				continue
 			}
 			severity := strings.ToLower(strings.TrimSpace(asString(condition["Severity"])))
-			if severity == "warning" || severity == "critical" || health == "warning" || health == "critical" {
+			if severity == "critical" || health == "critical" {
 				for _, key := range []string{"Message", "MessageId", "Resolution"} {
 					if detail := strings.TrimSpace(asString(condition[key])); detail != "" {
 						return true, detail
@@ -729,7 +723,7 @@ func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
 		}
 	}
 
-	if health == "warning" || health == "critical" {
+	if health == "critical" {
 		return true, fmt.Sprintf("Redfish inventory health is %s", health)
 	}
 
@@ -737,77 +731,102 @@ func redfishInventoryFailure(body map[string]interface{}) (bool, string) {
 }
 
 func getRedfishJSON(ctx context.Context, targetAddress, username, password, uri string) (map[string]interface{}, int, error) {
-	endpoint := resolveRedfishEndpoint(targetAddress, uri)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, 0, fmt.Errorf("build Redfish GET request: %w", err)
-	}
-	req.SetBasicAuth(username, password)
-
-	resp, err := newRedfishHTTPClient().Do(req)
-	if err != nil {
-		if isLikelyTransientNetworkError(err) {
-			return nil, 0, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
-		}
-		return nil, 0, fmt.Errorf("Redfish GET failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
-		return nil, resp.StatusCode, &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
-		return nil, resp.StatusCode, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("Redfish returned %s", resp.Status)}
-	}
-
-	var body map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("parse Redfish response: %w", err)
-	}
-
-	return body, resp.StatusCode, nil
-}
-
-func newRedfishHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-}
-
-func resolveRedfishEndpoint(targetAddress, uri string) string {
-	uri = strings.TrimSpace(uri)
-	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
-		return uri
-	}
-	if strings.HasPrefix(uri, "/") {
-		return fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), uri)
-	}
-	return fmt.Sprintf("https://%s/%s", strings.TrimSpace(targetAddress), uri)
+	client := redfish.NewClient(targetAddress, username, password)
+	return client.GetJSON(ctx, uri)
 }
 
 func redfishTaskDetail(body map[string]interface{}) string {
+	if messages, ok := body["Messages"].([]interface{}); ok {
+		if detail := preferredRedfishTaskMessage(messages); detail != "" {
+			return detail
+		}
+	}
+
 	if message, ok := body["Message"].(string); ok && strings.TrimSpace(message) != "" {
 		return strings.TrimSpace(message)
 	}
 
-	if messages, ok := body["Messages"].([]interface{}); ok {
-		for _, raw := range messages {
-			messageMap, ok := raw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			for _, key := range []string{"Message", "MessageId", "Resolution"} {
-				if value := strings.TrimSpace(asString(messageMap[key])); value != "" {
-					return value
-				}
+	return strings.TrimSpace(asString(body["TaskStatus"]))
+}
+
+func preferredRedfishTaskMessage(messages []interface{}) string {
+	bestScore := -1
+	bestDetail := ""
+	for _, raw := range messages {
+		messageMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		messageID := strings.TrimSpace(asString(messageMap["MessageId"]))
+		message := strings.TrimSpace(asString(messageMap["Message"]))
+		resolution := strings.TrimSpace(asString(messageMap["Resolution"]))
+
+		score := redfishTaskMessageScore(messageID, message)
+		detail := firstNonEmptyTaskDetail(messageID, message, resolution)
+		if detail == "" {
+			continue
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestDetail = detail
+		}
+	}
+
+	return bestDetail
+}
+
+func redfishTaskMessageScore(messageID, message string) int {
+	combined := strings.ToLower(strings.TrimSpace(messageID + " " + message))
+	score := 0
+	if messageID != "" {
+		score += 2
+	}
+	for _, token := range []string{"critical", "error", "fail", "timeout", "aborted", "exception"} {
+		if strings.Contains(combined, token) {
+			score += 4
+		}
+	}
+	for _, token := range []string{"warning", "reboot", "pending"} {
+		if strings.Contains(combined, token) {
+			score += 1
+		}
+	}
+	return score
+}
+
+func firstNonEmptyTaskDetail(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func redfishTaskHasTransitionalWarning(body map[string]interface{}) bool {
+	messages, ok := body["Messages"].([]interface{})
+	if !ok {
+		return false
+	}
+
+	for _, raw := range messages {
+		messageMap, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		messageID := strings.ToLower(strings.TrimSpace(asString(messageMap["MessageId"])))
+		message := strings.ToLower(strings.TrimSpace(asString(messageMap["Message"])))
+		combined := messageID + " " + message
+		for _, token := range []string{"pendingreboot", "reboot", "resetrequired", "restartrequired", "pending"} {
+			if strings.Contains(combined, token) {
+				return true
 			}
 		}
 	}
 
-	return strings.TrimSpace(asString(body["TaskStatus"]))
+	return false
 }
 
 func asString(value interface{}) string {
@@ -836,194 +855,80 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 }
 
 func isTerminalError(err error) bool {
-	statusErr, ok := err.(*firmwareproxy.HTTPStatusError)
-	if !ok {
-		return false
+	var proxyStatusErr *firmwareproxy.HTTPStatusError
+	if errors.As(err, &proxyStatusErr) {
+		return proxyStatusErr.StatusCode >= 400 && proxyStatusErr.StatusCode < 500
 	}
 
-	return statusErr.StatusCode >= 400 && statusErr.StatusCode < 500
-}
-
-func isLikelyTransientNetworkError(err error) bool {
-	if err == nil {
-		return false
+	var redfishStatusErr *redfish.Error
+	if errors.As(err, &redfishStatusErr) {
+		return redfishStatusErr.IsClientError()
 	}
 
-	if ue, ok := err.(*url.Error); ok {
-		err = ue.Err
-	}
-
-	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout() || netErr.Temporary()
-	}
-
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "timeout") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "no route to host")
+	return false
 }
 
 // discoverUpdateServiceAction queries the UpdateService endpoint and returns the SimpleUpdate action URI
 func discoverUpdateServiceAction(ctx context.Context, targetAddress, username, password string) (string, error) {
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService", strings.TrimSpace(targetAddress))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", fmt.Errorf("build UpdateService GET request: %w", err)
-	}
-	req.SetBasicAuth(username, password)
-
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if isLikelyTransientNetworkError(err) {
-			return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
-		}
-		return "", fmt.Errorf("UpdateService GET failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
-		return "", &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("UpdateService returned %s", resp.Status)}
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
-		return "", &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("UpdateService returned %s", resp.Status)}
-	}
-
-	var updateService map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&updateService); err != nil {
-		return "", fmt.Errorf("parse UpdateService response: %w", err)
-	}
-
-	// Look for Actions object
-	actions, ok := updateService["Actions"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("auto-discovery failed: no Actions object in UpdateService response")
-	}
-
-	// Try to find SimpleUpdate action with either key format
-	var actionTarget string
-	if simpleUpdate, ok := actions["#UpdateService.SimpleUpdate"].(map[string]interface{}); ok {
-		if target, ok := simpleUpdate["target"].(string); ok {
-			actionTarget = target
-		}
-	} else if simpleUpdate, ok := actions["#SimpleUpdate"].(map[string]interface{}); ok {
-		if target, ok := simpleUpdate["target"].(string); ok {
-			actionTarget = target
-		}
-	}
-
-	if actionTarget == "" {
-		return "", fmt.Errorf("auto-discovery failed: no SimpleUpdate action found in UpdateService")
-	}
-
-	return actionTarget, nil
+	client := redfish.NewClient(targetAddress, username, password)
+	return client.DiscoverUpdateServiceAction(ctx)
 }
 
 // discoverTargetsFromInventory queries FirmwareInventory and returns targets matching the component
 func discoverTargetsFromInventory(ctx context.Context, targetAddress, username, password, component string) ([]string, error) {
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/FirmwareInventory", strings.TrimSpace(targetAddress))
+	client := redfish.NewClient(targetAddress, username, password)
+	return client.DiscoverTargetsFromInventory(ctx, component)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build FirmwareInventory GET request: %w", err)
+func redfishLongPollInterval(attempt int) time.Duration {
+	interval := redfishLongPollMinInterval + (time.Duration(attempt-1) * 5 * time.Second)
+	if interval > redfishLongPollMaxInterval {
+		return redfishLongPollMaxInterval
 	}
-	req.SetBasicAuth(username, password)
+	return interval
+}
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if isLikelyTransientNetworkError(err) {
-			return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
-		}
-		return nil, fmt.Errorf("FirmwareInventory GET failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
-		return nil, &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
-		return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
-	}
-
-	var inventory map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&inventory); err != nil {
-		return nil, fmt.Errorf("parse FirmwareInventory response: %w", err)
-	}
-
-	members, ok := inventory["Members"].([]interface{})
+func versionsSemanticallyEqual(installedVersion, resolvedVersion string) bool {
+	installedNormalized, ok := normalizeSemver(installedVersion)
 	if !ok {
-		return nil, fmt.Errorf("auto-discovery failed: no Members array in FirmwareInventory response")
+		return false
 	}
 
-	var targets []string
-	componentLower := strings.ToLower(component)
-
-	for _, member := range members {
-		memberMap, ok := member.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		// Get the @odata.id for this member
-		memberID, ok := memberMap["@odata.id"].(string)
-		if !ok || memberID == "" {
-			continue
-		}
-
-		// Fetch the member details
-		memberReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), memberID), nil)
-		if err != nil {
-			continue
-		}
-		memberReq.SetBasicAuth(username, password)
-
-		memberResp, err := client.Do(memberReq)
-		if err != nil || memberResp.StatusCode != http.StatusOK {
-			if memberResp != nil {
-				memberResp.Body.Close()
-			}
-			continue
-		}
-
-		var memberDetail map[string]interface{}
-		if err := json.NewDecoder(memberResp.Body).Decode(&memberDetail); err != nil {
-			memberResp.Body.Close()
-			continue
-		}
-		memberResp.Body.Close()
-
-		// Check Id, Name, and Description fields for component match
-		if id, ok := memberDetail["Id"].(string); ok && strings.Contains(strings.ToLower(id), componentLower) {
-			targets = append(targets, memberID)
-			continue
-		}
-		if name, ok := memberDetail["Name"].(string); ok && strings.Contains(strings.ToLower(name), componentLower) {
-			targets = append(targets, memberID)
-			continue
-		}
-		if description, ok := memberDetail["Description"].(string); ok && strings.Contains(strings.ToLower(description), componentLower) {
-			targets = append(targets, memberID)
-			continue
-		}
+	resolvedNormalized, ok := normalizeSemver(resolvedVersion)
+	if !ok {
+		return false
 	}
 
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("auto-discovery failed: component %q not found in FirmwareInventory", component)
+	return semver.Compare(installedNormalized, resolvedNormalized) == 0
+}
+
+func normalizeSemver(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
 	}
 
-	return targets, nil
+	if normalized, ok := canonicalizeSemverCandidate(trimmed); ok {
+		return normalized, true
+	}
+
+	token := semverTokenPattern.FindString(trimmed)
+	if token == "" {
+		return "", false
+	}
+
+	return canonicalizeSemverCandidate(token)
+}
+
+func canonicalizeSemverCandidate(candidate string) (string, bool) {
+	withPrefix := candidate
+	if !strings.HasPrefix(withPrefix, "v") {
+		withPrefix = "v" + withPrefix
+	}
+	if !semver.IsValid(withPrefix) {
+		return "", false
+	}
+	return semver.Canonical(withPrefix), true
 }
 
 func loadBMCCredentials(secretID string) (bmcCredentials, error) {
