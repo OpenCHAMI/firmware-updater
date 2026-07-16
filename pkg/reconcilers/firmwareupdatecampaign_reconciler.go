@@ -8,8 +8,6 @@ package reconcilers
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -400,34 +398,10 @@ func discoverInventoryComponentsWithBackoff(ctx context.Context, targetAddress, 
 }
 
 func discoverInventoryComponents(ctx context.Context, targetAddress, username, password string) ([]inventoryComponent, error) {
-	endpoint := fmt.Sprintf("https://%s/redfish/v1/UpdateService/FirmwareInventory", strings.TrimSpace(targetAddress))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	client := newRedfishClient(targetAddress, username, password)
+	inventory, _, err := client.GetJSON(ctx, "/redfish/v1/UpdateService/FirmwareInventory")
 	if err != nil {
-		return nil, fmt.Errorf("build FirmwareInventory GET request: %w", err)
-	}
-	req.SetBasicAuth(username, password)
-
-	client := newCampaignRedfishHTTPClient()
-	resp, err := client.Do(req)
-	if err != nil {
-		if isLikelyTransientNetworkError(err) {
-			return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: err.Error()}
-		}
-		return nil, fmt.Errorf("FirmwareInventory GET failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 && resp.StatusCode <= 499 {
-		return nil, &firmwareproxy.HTTPStatusError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode >= 500 {
-		return nil, &firmwareproxy.HTTPStatusError{StatusCode: 503, Message: fmt.Sprintf("FirmwareInventory returned %s", resp.Status)}
-	}
-
-	var inventory map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&inventory); err != nil {
-		return nil, fmt.Errorf("parse FirmwareInventory response: %w", err)
+		return nil, err
 	}
 
 	members, ok := inventory["Members"].([]interface{})
@@ -442,12 +416,12 @@ func discoverInventoryComponents(ctx context.Context, targetAddress, username, p
 			continue
 		}
 
-		memberID, ok := memberMap["@odata.id"].(string)
-		if !ok || strings.TrimSpace(memberID) == "" {
+		memberID := strings.TrimSpace(asString(memberMap["@odata.id"]))
+		if memberID == "" {
 			continue
 		}
 
-		memberDetail, err := fetchInventoryMemberDetail(ctx, client, targetAddress, memberID, username, password)
+		memberDetail, _, err := client.GetJSON(ctx, memberID)
 		if err != nil {
 			continue
 		}
@@ -470,40 +444,6 @@ func discoverInventoryComponents(ctx context.Context, targetAddress, username, p
 	}
 
 	return components, nil
-}
-
-func fetchInventoryMemberDetail(ctx context.Context, client *http.Client, targetAddress, memberID, username, password string) (map[string]interface{}, error) {
-	memberReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), memberID), nil)
-	if err != nil {
-		return nil, err
-	}
-	memberReq.SetBasicAuth(username, password)
-
-	memberResp, err := client.Do(memberReq)
-	if err != nil {
-		return nil, err
-	}
-	defer memberResp.Body.Close()
-
-	if memberResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("FirmwareInventory member returned %s", memberResp.Status)
-	}
-
-	var memberDetail map[string]interface{}
-	if err := json.NewDecoder(memberResp.Body).Decode(&memberDetail); err != nil {
-		return nil, err
-	}
-
-	return memberDetail, nil
-}
-
-func newCampaignRedfishHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
 }
 
 func isUniversalDiscoveryCampaign(campaign *v1.FirmwareUpdateCampaign) bool {

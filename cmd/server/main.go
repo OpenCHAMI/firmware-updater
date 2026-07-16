@@ -61,8 +61,9 @@ type Config struct {
 	DatabaseURL string `mapstructure:"database-url"`
 
 	// Reconciliation Configuration
-	ReconcileEnabled bool `mapstructure:"reconcile_enabled"`
-	ReconcileWorkers int  `mapstructure:"reconcile_workers"`
+	ReconcileEnabled   bool `mapstructure:"reconcile_enabled"`
+	ReconcileWorkers   int  `mapstructure:"reconcile_workers"`
+	RedfishHTTPTimeout int  `mapstructure:"redfish_http_timeout"`
 
 	// Feature Flags
 
@@ -87,8 +88,9 @@ func DefaultConfig() *Config {
 
 		DatabaseURL: "file:./data.db?cache=shared&_fk=1",
 
-		ReconcileEnabled: true,
-		ReconcileWorkers: 5,
+		ReconcileEnabled:   true,
+		ReconcileWorkers:   5,
+		RedfishHTTPTimeout: 20,
 
 		Debug: false,
 
@@ -136,6 +138,7 @@ func init() {
 	serveCmd.Flags().Int("read-timeout", 15, "Read timeout in seconds")
 	serveCmd.Flags().Int("write-timeout", 15, "Write timeout in seconds")
 	serveCmd.Flags().Int("idle-timeout", 60, "Idle timeout in seconds")
+	serveCmd.Flags().Int("redfish-http-timeout", 20, "Redfish HTTP client timeout in seconds")
 
 	serveCmd.Flags().String("database-url", "", "Database connection URL")
 	serveCmd.Flags().String("secrets-file", "secrets.json", "Path to encrypted secrets store JSON file")
@@ -179,6 +182,7 @@ func initConfig() {
 	viper.BindEnv("quay_username")
 	viper.BindEnv("quay_password")
 	viper.BindEnv("secrets-file")
+	viper.BindEnv("redfish_http_timeout")
 
 	// Read config file if it exists
 	if err := viper.ReadInConfig(); err == nil {
@@ -292,6 +296,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	if config.ReconcileEnabled {
 		ctx := context.Background()
+		reconcilers.SetRedfishHTTPTimeout(time.Duration(config.RedfishHTTPTimeout) * time.Second)
 
 		// Create reconciliation controller (use the single bus from above)
 		controller := reconcile.NewController(eventBus, storage.Backend)
@@ -311,7 +316,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 		defer controller.Stop()
 
-		log.Printf("Reconciliation controller started with %d workers", 5)
+		log.Printf("Reconciliation controller started with %d workers (redfish-timeout=%s)", 5, time.Duration(config.RedfishHTTPTimeout)*time.Second)
 	}
 
 	// Register resource prefixes for UID generation
