@@ -49,7 +49,9 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 		return fmt.Errorf("list campaign child jobs: %w", err)
 	}
 
-	desiredJobs, err := r.desiredCampaignJobs(ctx, campaign)
+	activeTargets := buildActiveCampaignTargets(jobsByKey)
+
+	desiredJobs, err := r.desiredCampaignJobs(ctx, campaign, activeTargets)
 	if err != nil {
 		return fmt.Errorf("resolve desired campaign jobs: %w", err)
 	}
@@ -116,10 +118,14 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileDesiredCampaignJobs(ctx cont
 	return createdAny, nil
 }
 
-func (r *FirmwareUpdateCampaignReconciler) desiredCampaignJobs(ctx context.Context, campaign *v1.FirmwareUpdateCampaign) ([]desiredCampaignJob, error) {
+func (r *FirmwareUpdateCampaignReconciler) desiredCampaignJobs(ctx context.Context, campaign *v1.FirmwareUpdateCampaign, activeTargets map[string]bool) ([]desiredCampaignJob, error) {
 	if !isUniversalDiscoveryCampaign(campaign) {
 		desired := make([]desiredCampaignJob, 0, len(campaign.Spec.Targets))
 		for _, target := range campaign.Spec.Targets {
+			if activeTargets[target.TargetAddress] {
+				continue
+			}
+
 			key := defaultCampaignChildKey(target.TargetAddress)
 			desired = append(desired, desiredCampaignJob{
 				key: key,
@@ -135,6 +141,10 @@ func (r *FirmwareUpdateCampaignReconciler) desiredCampaignJobs(ctx context.Conte
 
 	desired := make([]desiredCampaignJob, 0)
 	for _, target := range campaign.Spec.Targets {
+		if activeTargets[target.TargetAddress] {
+			continue
+		}
+
 		creds, err := loadBMCCredentials(target.SecretID)
 		if err != nil {
 			return nil, fmt.Errorf("load credentials for target %q: %w", target.TargetAddress, err)
