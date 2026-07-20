@@ -191,6 +191,38 @@ func TestBuildActiveCampaignTargets(t *testing.T) {
 	}
 }
 
+func TestDesiredCampaignJobs_SkipsActiveTargetsBeforeEvaluation(t *testing.T) {
+	reconciler := &FirmwareUpdateCampaignReconciler{}
+	campaign := &v1.FirmwareUpdateCampaign{
+		APIVersion: "hardware.fabrica.dev/v1",
+		Kind:       "FirmwareUpdateCampaign",
+		Metadata: fabrica.Metadata{
+			Name: "campaign-a",
+			UID:  "campaign-a-uid",
+		},
+		Spec: v1.FirmwareUpdateCampaignSpec{
+			OCIReference: strPtr("registry.example.com/fw/image:v1"),
+			Targets: []v1.FirmwareCampaignTarget{
+				{TargetAddress: "10.0.0.10", SecretID: "secret-a"},
+				{TargetAddress: "10.0.0.11", SecretID: "secret-b"},
+			},
+		},
+	}
+
+	activeTargets := map[string]bool{"10.0.0.10": true}
+	desired, err := reconciler.desiredCampaignJobs(context.Background(), campaign, activeTargets)
+	if err != nil {
+		t.Fatalf("desiredCampaignJobs failed: %v", err)
+	}
+
+	if len(desired) != 1 {
+		t.Fatalf("expected one desired child job for inactive target, got %d", len(desired))
+	}
+	if desired[0].job.Spec.TargetAddress != "10.0.0.11" {
+		t.Fatalf("expected desired child job for inactive target 10.0.0.11, got %q", desired[0].job.Spec.TargetAddress)
+	}
+}
+
 func TestReconcileDesiredCampaignJobs_SequencesPerTargetAcrossReconciles(t *testing.T) {
 	ctx := context.Background()
 	client, cleanup := setupReconcilerTestStorageClient(t)
@@ -275,7 +307,7 @@ func buildTestDesiredCampaignJob(key, targetAddress, name string) desiredCampaig
 		Metadata: fabrica.Metadata{
 			Name: name,
 			Annotations: map[string]string{
-				v1.CampaignTargetAnnotation: targetAddress,
+				v1.CampaignTargetAnnotation:   targetAddress,
 				v1.CampaignChildKeyAnnotation: key,
 			},
 		},
@@ -287,6 +319,10 @@ func buildTestDesiredCampaignJob(key, targetAddress, name string) desiredCampaig
 	}
 
 	return desiredCampaignJob{key: key, job: job}
+}
+
+func strPtr(value string) *string {
+	return &value
 }
 
 func setupReconcilerTestStorageClient(t *testing.T) (*storage.StorageClient, func()) {
