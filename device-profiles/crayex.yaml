@@ -1,0 +1,33 @@
+# HPE Cray EX device profile (liquid-cooled).
+# Cray EX does NOT support the OData $expand parameter; FirmwareInventory
+# members are read individually.
+
+id: crayex
+name: "HPE Cray EX (liquid-cooled)"
+enabled: true
+
+# ----- Update dispatch -----
+updateActionURI: /redfish/v1/UpdateService/Actions/SimpleUpdate
+updatePayloadTemplate: |
+  {
+    "ImageURI": "%imageURI%",
+    "TransferProtocol": "HTTP",
+    "Targets": ["%target%"]
+  }
+updateMethod: POST
+
+# ----- Device identity -----
+manufacturerPath: /redfish/v1/Chassis/Enclosure
+manufacturerField: Manufacturer
+modelPath: /redfish/v1/Chassis/Enclosure
+modelField: Model
+
+# ----- Inventory expansion -----
+supportsInventoryExpand: false
+firmwareInventoryExpandParam: ""
+
+# ----- Profile selection verification -----
+verification:
+  path: /redfish/v1/UpdateService/FirmwareInventory/BMC
+  field: SoftwareId
+  pattern: "^(nc|cc|sc)"

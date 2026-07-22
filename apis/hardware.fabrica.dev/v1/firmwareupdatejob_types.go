@@ -46,6 +46,7 @@ type FirmwareUpdateJobStatus struct {
 	ErrorDetail     string `json:"errorDetail,omitempty"`
 	ResolvedVersion string `json:"resolvedVersion,omitempty"`
 	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
+	DeviceProfileID string `json:"deviceProfileID,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateJob

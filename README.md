@@ -128,6 +128,10 @@ Observed result from latest run:
 - All 3 failed intentionally due to dummy payloads or Redfish rejection.
 - This behavior was expected for this test.
 
+## Device Profiles
+
+The firmware updater now supports device profiles that define hardware characteristics and compatibility rules for firmware updates. Device profiles are YAML-based configuration files that allow you to specify how different hardware models should be identified and matched during the firmware discovery and update process. Profiles can be loaded from the `device-profiles/` directory and enable more flexible hardware matching across diverse infrastructure environments. For detailed information about device profile structure, configuration options, and best practices, see [DeviceProfile.md](docs/DeviceProfile.md).
+
 ## What `FirmwareUpdateCampaign` Supports
 
 `FirmwareUpdateCampaign` supports three modes:
