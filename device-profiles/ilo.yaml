@@ -1,0 +1,30 @@
+# HPE iLO 5/6 device profile.
+# iLO supports the OData $expand parameter using the DMTF standard syntax.
+
+id: ilo
+name: "HPE iLO 5/6"
+enabled: true
+
+# ----- Update dispatch -----
+updateActionURI: /redfish/v1/UpdateService/Actions/SimpleUpdate
+updatePayloadTemplate: |
+  {
+    "ImageURI": "%imageURI%"
+  }
+updateMethod: POST
+
+# ----- Device identity -----
+manufacturerPath: /redfish/v1/Chassis/1
+manufacturerField: Manufacturer
+modelPath: /redfish/v1/Chassis/1
+modelField: Model
+
+# ----- Inventory expansion -----
+supportsInventoryExpand: true
+firmwareInventoryExpandParam: "?$expand=."
+
+# ----- Profile selection verification -----
+verification:
+  path: /redfish/v1/Managers/1
+  field: Model
+  pattern: "^iLO"

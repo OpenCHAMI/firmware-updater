@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: MIT
 
 package v1
-package v1
 
 import (
 	"context"
