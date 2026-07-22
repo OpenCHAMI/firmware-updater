@@ -42,7 +42,23 @@ podman run --replace \
 
 Note: if you want SQLite data to persist across container replacement, use a host bind mount and point `--database-url` to that mounted path.
 
-### 3) Push firmware artifacts with required ORAS metadata
+### 3) Device Profiles
+
+The server loads profile YAML files from `./device-profiles` at startup by default.
+
+Verify loaded profiles:
+
+```bash
+curl -sS http://127.0.0.1:8090/deviceprofiles/ | jq
+```
+
+Reload profiles after editing files in `device-profiles/`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/deviceprofiles/reload | jq
+```
+
+### 4) Push firmware artifacts with required ORAS metadata
 
 ```bash
 oras push 127.0.0.1:5000/firmware/bmc:99.99.99 \
@@ -67,7 +83,7 @@ oras push 127.0.0.1:5000/firmware/17:3.0.0 \
   ./dummy-video.bin:application/octet-stream
 ```
 
-### 4) Submit universal campaign
+### 5) Submit universal campaign
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
@@ -95,7 +111,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
   }'
 ```
 
-### 5) Watch campaign and jobs
+### 6) Watch campaign and jobs
 
 ```bash
 curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/ | jq
@@ -103,6 +119,7 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
 ```
 
 If you need details, jump to:
+- [Design profiles](#3-device-profiles)
 - [ORAS rules](#1-how-to-push-images-correctly-with-oras)
 - [How OCI paths are derived](#2-how-to-identify-required-oci-paths)
 - [How target Redfish paths are derived](#3-how-to-identify-required-redfish-target-paths)
