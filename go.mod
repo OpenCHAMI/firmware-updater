@@ -9,7 +9,7 @@ go 1.26.5
 require (
 	entgo.io/ent v0.14.6
 	github.com/OpenCHAMI/magellan v0.5.1
-	github.com/getkin/kin-openapi v0.142.0
+	github.com/getkin/kin-openapi v0.143.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/mattn/go-sqlite3 v1.14.48
 	github.com/openchami/fabrica v0.4.9
