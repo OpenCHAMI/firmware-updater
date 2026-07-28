@@ -3,14 +3,15 @@ package firmwareproxy
 import (
 	"testing"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
 )
 
 func TestSelectManifestCandidateLatest(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "v1", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "v2", versionRaw: "1.10.0", versionNormalized: "v1.10.0", payloadDigest: "sha256:222"},
-		{tag: "v3", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:333"},
+		{tag: "v1", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "v2", versionRaw: "1.10.0", versionNormalized: "v1.10.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
+		{tag: "v3", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:333", payloadFilename: "fw-c.bin"},
 	}
 
 	selected, err := selectManifestCandidate(candidates, "latest")
@@ -28,8 +29,8 @@ func TestSelectManifestCandidateLatest(t *testing.T) {
 
 func TestSelectManifestCandidateExactVersion(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
 	}
 
 	selected, err := selectManifestCandidate(candidates, "1.2.0")
@@ -44,8 +45,8 @@ func TestSelectManifestCandidateExactVersion(t *testing.T) {
 
 func TestSelectManifestCandidateExactTwoComponentVersion(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
 	}
 
 	selected, err := selectManifestCandidate(candidates, "1.2")
@@ -60,7 +61,7 @@ func TestSelectManifestCandidateExactTwoComponentVersion(t *testing.T) {
 
 func TestSelectManifestCandidateInvalidTarget(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
 	}
 
 	_, err := selectManifestCandidate(candidates, "not-semver")
@@ -71,8 +72,8 @@ func TestSelectManifestCandidateInvalidTarget(t *testing.T) {
 
 func TestSelectNewerManifestCandidate(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
 	}
 
 	selected, updateAvailable, err := selectNewerManifestCandidate(candidates, "nc.1.2.0-build42")
@@ -89,8 +90,8 @@ func TestSelectNewerManifestCandidate(t *testing.T) {
 
 func TestSelectNewerManifestCandidateNoUpdateNeeded(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
 	}
 
 	_, updateAvailable, err := selectNewerManifestCandidate(candidates, "1.3.0")
@@ -104,8 +105,8 @@ func TestSelectNewerManifestCandidateNoUpdateNeeded(t *testing.T) {
 
 func TestSelectNewerManifestCandidateTwoComponentInstalledVersion(t *testing.T) {
 	candidates := []manifestCandidate{
-		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111"},
-		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222"},
+		{tag: "tag-a", versionRaw: "1.2.0", versionNormalized: "v1.2.0", payloadDigest: "sha256:111", payloadFilename: "fw-a.bin"},
+		{tag: "tag-b", versionRaw: "1.3.0", versionNormalized: "v1.3.0", payloadDigest: "sha256:222", payloadFilename: "fw-b.bin"},
 	}
 
 	selected, updateAvailable, err := selectNewerManifestCandidate(candidates, "1.2")
@@ -128,6 +129,51 @@ func TestIsCompatibleHardwareAny(t *testing.T) {
 	}
 	if isCompatibleHardwareAny(annotation, []string{"foo", "bar"}) {
 		t.Fatalf("did not expect non-matching hints to match compatibility annotation")
+	}
+}
+
+func TestBuildManifestCandidateExtractsPayloadFilename(t *testing.T) {
+	manifest := ocispec.Manifest{
+		ArtifactType: FirmwareBundleArtifactType,
+		Annotations: map[string]string{
+			annotationCompatibleHardware: "x1000",
+			annotationImageVersion:       "1.2.3",
+		},
+		Layers: []ocispec.Descriptor{{
+			Digest: "sha256:111",
+			Annotations: map[string]string{
+				annotationImageTitle: "dummy-video.bin",
+			},
+		}},
+	}
+
+	candidate, ok := buildManifestCandidate(manifest, "tag-a", "x1000")
+	if !ok {
+		t.Fatal("expected candidate to be selected")
+	}
+	if candidate.payloadFilename != "dummy-video.bin" {
+		t.Fatalf("expected payload filename dummy-video.bin, got %q", candidate.payloadFilename)
+	}
+}
+
+func TestBuildManifestCandidateMissingPayloadFilenameDefaultsEmpty(t *testing.T) {
+	manifest := ocispec.Manifest{
+		ArtifactType: FirmwareBundleArtifactType,
+		Annotations: map[string]string{
+			annotationCompatibleHardware: "x1000",
+			annotationImageVersion:       "1.2.3",
+		},
+		Layers: []ocispec.Descriptor{{
+			Digest: "sha256:111",
+		}},
+	}
+
+	candidate, ok := buildManifestCandidate(manifest, "tag-a", "x1000")
+	if !ok {
+		t.Fatal("expected candidate to be selected")
+	}
+	if candidate.payloadFilename != "" {
+		t.Fatalf("expected empty payload filename, got %q", candidate.payloadFilename)
 	}
 }
 

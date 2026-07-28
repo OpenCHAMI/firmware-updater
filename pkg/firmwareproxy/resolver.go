@@ -26,6 +26,7 @@ const FirmwareBundleArtifactType = "application/vnd.openchami.firmware.bundle.v1
 const (
 	annotationCompatibleHardware = "dev.fabrica.hardware.compatible"
 	annotationImageVersion       = "org.opencontainers.image.version"
+	annotationImageTitle         = "org.opencontainers.image.title"
 )
 
 type HTTPStatusError struct {
@@ -48,9 +49,10 @@ type payloadLocation struct {
 }
 
 type DiscoveryResult struct {
-	Version      string
-	Digest       string
-	OCIReference string
+	Version         string
+	Digest          string
+	OCIReference    string
+	PayloadFilename string
 }
 
 type manifestCandidate struct {
@@ -58,6 +60,7 @@ type manifestCandidate struct {
 	versionRaw        string
 	versionNormalized string
 	payloadDigest     string
+	payloadFilename   string
 }
 
 type authConfig struct {
@@ -79,15 +82,15 @@ func InitAuth(username, password string) {
 	authState.Unlock()
 }
 
-func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
+func ResolvePayload(ctx context.Context, ociReference string) (DiscoveryResult, error) {
 	parsed, err := registry.ParseReference(ociReference)
 	if err != nil {
-		return "", fmt.Errorf("parse OCI reference: %w", err)
+		return DiscoveryResult{}, fmt.Errorf("parse OCI reference: %w", err)
 	}
 
 	repo, err := remote.NewRepository(parsed.Registry + "/" + parsed.Repository)
 	if err != nil {
-		return "", fmt.Errorf("create ORAS repository client: %w", err)
+		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
 	}
 	repo.PlainHTTP = isLoopbackRegistry(parsed.Registry)
 	applyRepoAuth(repo)
@@ -95,27 +98,29 @@ func ResolvePayload(ctx context.Context, ociReference string) (string, error) {
 	reference := parsed.ReferenceOrDefault()
 	_, manifestBytes, err := oras.FetchBytes(ctx, repo, reference, oras.FetchBytesOptions{})
 	if err != nil {
-		return "", classifyORASError(fmt.Errorf("fetch manifest for %q: %w", reference, err))
+		return DiscoveryResult{}, classifyORASError(fmt.Errorf("fetch manifest for %q: %w", reference, err))
 	}
 
 	var manifest ocispec.Manifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return "", fmt.Errorf("decode OCI manifest: %w", err)
+		return DiscoveryResult{}, fmt.Errorf("decode OCI manifest: %w", err)
 	}
 	if manifest.ArtifactType != FirmwareBundleArtifactType {
-		return "", &HTTPStatusError{
+		return DiscoveryResult{}, &HTTPStatusError{
 			StatusCode: 400,
 			Message:    fmt.Sprintf("unexpected artifactType %q (expected %q)", manifest.ArtifactType, FirmwareBundleArtifactType),
 		}
 	}
 	if len(manifest.Layers) == 0 {
-		return "", &HTTPStatusError{StatusCode: 400, Message: "firmware bundle has no layers"}
+		return DiscoveryResult{}, &HTTPStatusError{StatusCode: 400, Message: "firmware bundle has no layers"}
 	}
 
-	payloadDigest := manifest.Layers[0].Digest.String()
+	payloadLayer := manifest.Layers[0]
+	payloadDigest := payloadLayer.Digest.String()
+	payloadFilename := strings.TrimSpace(payloadLayer.Annotations[annotationImageTitle])
 	payloadIndex.Store(payloadDigest, payloadLocation{Repository: parsed.Registry + "/" + parsed.Repository})
 
-	return payloadDigest, nil
+	return DiscoveryResult{Digest: payloadDigest, OCIReference: ociReference, PayloadFilename: payloadFilename}, nil
 }
 
 func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {
@@ -165,9 +170,10 @@ func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel,
 	payloadIndex.Store(selected.payloadDigest, payloadLocation{Repository: repository})
 
 	return DiscoveryResult{
-		Version:      selected.versionRaw,
-		Digest:       selected.payloadDigest,
-		OCIReference: fmt.Sprintf("%s:%s", repository, selected.tag),
+		Version:         selected.versionRaw,
+		Digest:          selected.payloadDigest,
+		OCIReference:    fmt.Sprintf("%s:%s", repository, selected.tag),
+		PayloadFilename: selected.payloadFilename,
 	}, nil
 }
 
@@ -218,9 +224,10 @@ func ResolvePayloadFromInventory(ctx context.Context, repository string, hardwar
 	payloadIndex.Store(selected.payloadDigest, payloadLocation{Repository: repository})
 
 	return DiscoveryResult{
-		Version:      selected.versionRaw,
-		Digest:       selected.payloadDigest,
-		OCIReference: fmt.Sprintf("%s:%s", repository, selected.tag),
+		Version:         selected.versionRaw,
+		Digest:          selected.payloadDigest,
+		OCIReference:    fmt.Sprintf("%s:%s", repository, selected.tag),
+		PayloadFilename: selected.payloadFilename,
 	}, true, nil
 }
 
@@ -249,6 +256,7 @@ func buildManifestCandidate(manifest ocispec.Manifest, tag, hardwareModel string
 		versionRaw:        versionRaw,
 		versionNormalized: versionNormalized,
 		payloadDigest:     manifest.Layers[0].Digest.String(),
+		payloadFilename:   strings.TrimSpace(manifest.Layers[0].Annotations[annotationImageTitle]),
 	}, true
 }
 
@@ -277,6 +285,7 @@ func buildManifestCandidateForHints(manifest ocispec.Manifest, tag string, hardw
 		versionRaw:        versionRaw,
 		versionNormalized: versionNormalized,
 		payloadDigest:     manifest.Layers[0].Digest.String(),
+		payloadFilename:   strings.TrimSpace(manifest.Layers[0].Annotations[annotationImageTitle]),
 	}, true
 }
 
