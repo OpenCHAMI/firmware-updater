@@ -9,16 +9,16 @@ go 1.26.5
 require (
 	entgo.io/ent v0.14.6
 	github.com/OpenCHAMI/magellan v0.5.1
-	github.com/getkin/kin-openapi v0.143.0
+	github.com/getkin/kin-openapi v0.146.0
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/mattn/go-sqlite3 v1.14.48
+	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/openchami/fabrica v0.4.9
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
-	golang.org/x/mod v0.38.0
+	golang.org/x/mod v0.39.0
 	gopkg.in/yaml.v3 v3.0.1
 	oras.land/oras-go/v2 v2.6.2
 )
