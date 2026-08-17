@@ -7,6 +7,7 @@
 package reconcilers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,6 +80,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	res.Status.JobState = "Resolving"
 	res.Status.ErrorDetail = ""
+	res.Status.Message = ""
 	if err := r.updateJobStatus(ctx, res); err != nil {
 		return fmt.Errorf("update status to Resolving: %w", err)
 	}
@@ -204,11 +206,30 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
 	}
 
-	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, proxyURI, actionURI, profile)
+	payload, payloadJSON, err := buildRedfishUpdatePayload(res, proxyURI, profile)
+	if err != nil {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = err.Error()
+		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set terminal failure after payload build error: %w", updateErr)
+		}
+		return nil
+	}
+
+	if res.Spec.DryRun {
+		res.Status.JobState = "Completed"
+		res.Status.TaskID = ""
+		res.Status.ErrorDetail = ""
+		res.Status.Message = buildDryRunSuccessMessage(redfishDispatchURI(res.Spec.TargetAddress, actionURI), payloadJSON)
+		return nil
+	}
+
+	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, actionURI, payload)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = err.Error()
+			res.Status.Message = ""
 			if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 				return fmt.Errorf("set terminal failure after Redfish dispatch error: %w", updateErr)
 			}
@@ -217,6 +238,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 		res.Status.ErrorDetail = err.Error()
 		res.Status.JobState = "Failed"
+		res.Status.Message = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("persist exhausted Redfish transient error as failed: %w", updateErr)
 		}
@@ -226,6 +248,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	res.Status.JobState = "InProgress"
 	res.Status.TaskID = taskID
 	res.Status.ErrorDetail = ""
+	res.Status.Message = ""
 
 	return nil
 }
@@ -471,12 +494,12 @@ func discoverTargetsFromInventoryWithBackoff(ctx context.Context, targetAddress,
 	return nil, lastErr
 }
 
-func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string, profile v1.DeviceProfile) (string, error) {
+func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, actionURI string, payload map[string]interface{}) (string, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		taskID, err := dispatchRedfishOnce(ctx, res, creds, proxyURI, actionURI, profile)
+		taskID, err := dispatchRedfishOnce(ctx, res, creds, actionURI, payload)
 		if err == nil {
 			return taskID, nil
 		}
@@ -495,27 +518,7 @@ func dispatchRedfishWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, 
 	return "", lastErr
 }
 
-func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, proxyURI, actionURI string, profile v1.DeviceProfile) (string, error) {
-	// Build the request body from the device profile's payload template.
-	target := ""
-	if len(res.Spec.Targets) > 0 {
-		target = res.Spec.Targets[0]
-	}
-	subs := map[string]string{
-		"imageURI":  proxyURI,
-		"target":    target,
-		"component": res.Spec.Component,
-	}
-	bodyJSON, err := deviceProfiles.BuildUpdatePayload(profile, subs)
-	if err != nil {
-		return "", fmt.Errorf("build Redfish update payload from device profile %q: %w", profile.Spec.ProfileID, err)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal(bodyJSON, &payload); err != nil {
-		return "", fmt.Errorf("decode Redfish update payload for profile %q: %w", profile.Spec.ProfileID, err)
-	}
-
+func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials, actionURI string, payload map[string]interface{}) (string, error) {
 	client := newRedfishClient(res.Spec.TargetAddress, creds.Username, creds.Password)
 	body, headers, _, err := client.PostJSON(ctx, actionURI, payload)
 	if err != nil {
@@ -532,6 +535,61 @@ func dispatchRedfishOnce(ctx context.Context, res *v1.FirmwareUpdateJob, creds b
 	}
 
 	return taskID, nil
+}
+
+func buildRedfishUpdatePayload(res *v1.FirmwareUpdateJob, proxyURI string, profile v1.DeviceProfile) (map[string]interface{}, string, error) {
+	// Build the request body from the device profile's payload template.
+	target := ""
+	if len(res.Spec.Targets) > 0 {
+		target = res.Spec.Targets[0]
+	}
+	subs := map[string]string{
+		"imageURI":  proxyURI,
+		"target":    target,
+		"component": res.Spec.Component,
+	}
+	bodyJSON, err := deviceProfiles.BuildUpdatePayload(profile, subs)
+	if err != nil {
+		return nil, "", fmt.Errorf("build Redfish update payload from device profile %q: %w", profile.Spec.ProfileID, err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(bodyJSON, &payload); err != nil {
+		return nil, "", fmt.Errorf("decode Redfish update payload for profile %q: %w", profile.Spec.ProfileID, err)
+	}
+
+	payloadJSON := strings.TrimSpace(string(bodyJSON))
+	if compacted, err := compactJSON(bodyJSON); err == nil {
+		payloadJSON = compacted
+	}
+
+	return payload, payloadJSON, nil
+}
+
+func compactJSON(raw []byte) (string, error) {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func redfishDispatchURI(targetAddress, actionURI string) string {
+	actionURI = strings.TrimSpace(actionURI)
+	if actionURI == "" {
+		return fmt.Sprintf("https://%s", strings.TrimSpace(targetAddress))
+	}
+	if strings.HasPrefix(actionURI, "http://") || strings.HasPrefix(actionURI, "https://") {
+		return actionURI
+	}
+	if !strings.HasPrefix(actionURI, "/") {
+		actionURI = "/" + actionURI
+	}
+	return fmt.Sprintf("https://%s%s", strings.TrimSpace(targetAddress), actionURI)
+}
+
+func buildDryRunSuccessMessage(deviceURI, payloadJSON string) string {
+	return fmt.Sprintf("Dry-run enabled: skipped Redfish SimpleUpdate POST to %s; payload=%s", strings.TrimSpace(deviceURI), strings.TrimSpace(payloadJSON))
 }
 
 type redfishTaskState string

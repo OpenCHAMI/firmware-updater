@@ -223,6 +223,28 @@ func TestDesiredCampaignJobs_SkipsActiveTargetsBeforeEvaluation(t *testing.T) {
 	}
 }
 
+func TestCampaignToChildJob_PropagatesDryRun(t *testing.T) {
+	campaign := &v1.FirmwareUpdateCampaign{
+		APIVersion: "hardware.fabrica.dev/v1",
+		Kind:       "FirmwareUpdateCampaign",
+		Metadata: fabrica.Metadata{
+			Name: "campaign-a",
+			UID:  "campaign-a-uid",
+		},
+		Spec: v1.FirmwareUpdateCampaignSpec{
+			ServerProxyAddress: "127.0.0.1",
+			Component:          "BMC",
+			DryRun:             true,
+		},
+	}
+	target := v1.FirmwareCampaignTarget{TargetAddress: "10.0.0.10", SecretID: "secret-a"}
+
+	child := campaignToChildJob(campaign, target, "10.0.0.10", strPtr("registry.example.com/fw/image:v1"), nil, "BMC", nil)
+	if !child.Spec.DryRun {
+		t.Fatalf("expected child job dryrun to be true when campaign dryrun is true")
+	}
+}
+
 func TestReconcileDesiredCampaignJobs_SequencesPerTargetAcrossReconciles(t *testing.T) {
 	ctx := context.Background()
 	client, cleanup := setupReconcilerTestStorageClient(t)

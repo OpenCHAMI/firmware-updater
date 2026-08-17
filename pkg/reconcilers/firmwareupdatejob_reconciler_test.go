@@ -281,6 +281,89 @@ func TestReconcileFirmwareUpdateJobIncludesStructuredRedfishErrorDetail(t *testi
 	}
 }
 
+func TestRedfishDispatchURI(t *testing.T) {
+	tests := []struct {
+		name          string
+		targetAddress string
+		actionURI     string
+		expected      string
+	}{
+		{
+			name:          "relative uri",
+			targetAddress: "10.0.0.1",
+			actionURI:     "/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+			expected:      "https://10.0.0.1/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+		},
+		{
+			name:          "relative uri without leading slash",
+			targetAddress: "10.0.0.1",
+			actionURI:     "redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+			expected:      "https://10.0.0.1/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+		},
+		{
+			name:          "absolute uri",
+			targetAddress: "10.0.0.1",
+			actionURI:     "https://example.invalid/update",
+			expected:      "https://example.invalid/update",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redfishDispatchURI(tt.targetAddress, tt.actionURI); got != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestBuildDryRunSuccessMessageIncludesURIAndPayload(t *testing.T) {
+	uri := "https://10.0.0.1/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate"
+	payload := `{"ImageURI":"http://127.0.0.1/firmware-proxy/layer/sha256:abc","Targets":["/redfish/v1/UpdateService/FirmwareInventory/BMC"]}`
+
+	msg := buildDryRunSuccessMessage(uri, payload)
+	if !strings.Contains(msg, uri) {
+		t.Fatalf("expected message to include uri %q, got %q", uri, msg)
+	}
+	if !strings.Contains(msg, payload) {
+		t.Fatalf("expected message to include payload %q, got %q", payload, msg)
+	}
+}
+
+func TestBuildRedfishUpdatePayloadIncludesExpectedFields(t *testing.T) {
+	res := &v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			Targets:   []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"},
+			Component: "BMC",
+		},
+	}
+	profile := v1.DeviceProfile{
+		Spec: v1.DeviceProfileSpec{
+			ProfileID:             "test-profile",
+			UpdatePayloadTemplate: `{"ImageURI":"%imageURI%","Targets":["%target%"],"Component":"%component%"}`,
+		},
+	}
+
+	payload, payloadJSON, err := buildRedfishUpdatePayload(res, "http://127.0.0.1/firmware-proxy/layer/sha256:abc", profile)
+	if err != nil {
+		t.Fatalf("buildRedfishUpdatePayload returned error: %v", err)
+	}
+
+	if got, _ := payload["ImageURI"].(string); got != "http://127.0.0.1/firmware-proxy/layer/sha256:abc" {
+		t.Fatalf("unexpected image uri in payload: %q", got)
+	}
+	targetsRaw, ok := payload["Targets"].([]interface{})
+	if !ok || len(targetsRaw) != 1 || targetsRaw[0] != "/redfish/v1/UpdateService/FirmwareInventory/BMC" {
+		t.Fatalf("unexpected targets in payload: %#v", payload["Targets"])
+	}
+	if got, _ := payload["Component"].(string); got != "BMC" {
+		t.Fatalf("unexpected component in payload: %q", got)
+	}
+	if !strings.Contains(payloadJSON, "\"ImageURI\":\"http://127.0.0.1/firmware-proxy/layer/sha256:abc\"") {
+		t.Fatalf("expected compact payload json to include image uri, got %q", payloadJSON)
+	}
+}
+
 func TestVersionsSemanticallyEqualStrictComparison(t *testing.T) {
 	if !versionsSemanticallyEqual("1.2.0", "1.2.0") {
 		t.Fatal("expected versions to match")

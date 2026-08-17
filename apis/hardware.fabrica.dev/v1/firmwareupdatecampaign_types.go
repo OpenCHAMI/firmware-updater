@@ -41,6 +41,7 @@ type FirmwareUpdateCampaignSpec struct {
 	Component          string                   `json:"component,omitempty"`
 	Discovery          *DiscoverySpec           `json:"discovery,omitempty"`
 	OCIReference       *string                  `json:"ociReference,omitempty"`
+	DryRun             bool                     `json:"dryrun,omitempty"`
 	Targets            []FirmwareCampaignTarget `json:"targets" validate:"required,dive"`
 }
 

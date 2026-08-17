@@ -195,6 +195,7 @@ func campaignToChildJob(campaign *v1.FirmwareUpdateCampaign, target v1.FirmwareC
 			Targets:            append([]string(nil), targets...),
 			Component:          component,
 			ServerProxyAddress: campaign.Spec.ServerProxyAddress,
+			DryRun:             campaign.Spec.DryRun,
 		},
 	}
 
