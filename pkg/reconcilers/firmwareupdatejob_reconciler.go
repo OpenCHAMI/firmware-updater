@@ -252,6 +252,9 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	res.Status.TaskID = taskID
 	res.Status.ErrorDetail = ""
 	res.Status.Message = ""
+	if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
+		return fmt.Errorf("set in-progress after Redfish dispatch: %w", updateErr)
+	}
 
 	return nil
 }
