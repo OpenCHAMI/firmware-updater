@@ -94,6 +94,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
     },
     "spec": {
       "serverProxyAddress": "10.254.1.20",
+      "dryrun": false,
       "targets": [
         {
           "targetAddress": "x9000c3s7b1",
@@ -170,6 +171,7 @@ Validation rules enforced by API type validation:
 - At least one of `spec.ociReference` or `spec.discovery` must be present.
 - If campaign uses `spec.ociReference`, `spec.component` must be set.
 - If campaign uses `spec.discovery` with `spec.component`, then `spec.discovery.hardwareModel` and `spec.discovery.version` are required.
+- `spec.dryrun` is optional and defaults to `false` when omitted.
 
 ## 1. How To Push Images Correctly With ORAS
 
@@ -456,6 +458,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
      },
      "spec": {
        "serverProxyAddress": "10.254.1.20",
+       "dryrun": false,
        "targets": [
          {
            "targetAddress": "x9000c3s7b1",
@@ -483,6 +486,76 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
 Expected behavior from validated run:
 - One campaign expanded into three child jobs.
 - Two jobs were for the same target (`x9000c3s7b1`) and ran sequentially because campaign reconciliation allows only one active child per target at a time.
+
+## Dry Run Mode
+
+Use dry run to execute normal reconcile preparation without sending the Redfish update command to the device.
+
+Behavior:
+- `dryrun` is supported on both `FirmwareUpdateCampaign.spec` and `FirmwareUpdateJob.spec`.
+- If omitted, `dryrun` defaults to `false`.
+- For campaigns, `spec.dryrun` is propagated to all child `FirmwareUpdateJob` resources.
+- With `dryrun=true`, job reconciliation still resolves OCI payloads, loads secrets, matches device profiles, discovers targets, and builds the exact Redfish payload.
+- The outbound Redfish POST is skipped.
+- The job is marked `Completed` when pre-dispatch steps succeed.
+- `status.message` is populated with the device URI and the payload that would have been sent.
+
+Example dry-run campaign:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "dryrun-campaign"
+    },
+    "spec": {
+      "serverProxyAddress": "10.254.1.20",
+      "dryrun": true,
+      "targets": [
+        {
+          "targetAddress": "x9000c3s7b1",
+          "secretID": "x9000-bmc"
+        }
+      ],
+      "discovery": {
+        "repository": "127.0.0.1:5000/firmware"
+      }
+    }
+  }'
+```
+
+Example dry-run job:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "dryrun-job"
+    },
+    "spec": {
+      "targetAddress": "x9000c3s7b1",
+      "secretID": "x9000-bmc",
+      "serverProxyAddress": "10.254.1.20",
+      "ociReference": "127.0.0.1:5000/firmware/bmc:99.99.99",
+      "component": "BMC",
+      "dryrun": true
+    }
+  }'
+```
+
+To inspect dry-run output details:
+
+```bash
+curl -sS http://127.0.0.1:8090/firmwareupdatejobs/ | jq
+```
+
+Look for:
+- `status.jobState = "Completed"`
+- `status.message` containing:
+  - the Redfish update URI
+  - the JSON payload that would have been posted
 
 ## 7. State Model And What To Watch
 

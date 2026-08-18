@@ -37,6 +37,7 @@ type FirmwareUpdateJobSpec struct {
 	Targets            []string       `json:"targets,omitempty" validate:"dive,required"`
 	Component          string         `json:"component,omitempty"`
 	ServerProxyAddress string         `json:"serverProxyAddress" validate:"required"`
+	DryRun             bool           `json:"dryrun,omitempty"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
@@ -44,6 +45,7 @@ type FirmwareUpdateJobStatus struct {
 	JobState        string `json:"jobState,omitempty"`
 	TaskID          string `json:"taskID,omitempty"`
 	ErrorDetail     string `json:"errorDetail,omitempty"`
+	Message         string `json:"message,omitempty"`
 	ResolvedVersion string `json:"resolvedVersion,omitempty"`
 	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
 	PayloadFilename string `json:"payloadFilename,omitempty"`
