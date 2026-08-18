@@ -221,6 +221,9 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		res.Status.TaskID = ""
 		res.Status.ErrorDetail = ""
 		res.Status.Message = buildDryRunSuccessMessage(redfishDispatchURI(res.Spec.TargetAddress, actionURI), payloadJSON)
+		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
+			return fmt.Errorf("set terminal success for dry run: %w", updateErr)
+		}
 		return nil
 	}
 
