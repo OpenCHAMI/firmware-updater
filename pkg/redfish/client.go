@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/user/firmware-updater/pkg/debug"
 )
 
 // Error represents a structured Redfish HTTP failure.
@@ -204,19 +206,31 @@ func (c *Client) doJSON(ctx context.Context, method, uri string, payload interfa
 }
 
 func (c *Client) doJSONWithHeaders(ctx context.Context, method, uri string, payload interface{}) (map[string]interface{}, http.Header, int, error) {
+	if debug.IsEnabled() {
+		defer debug.Trace("redfish.Client.doJSONWithHeaders", "method", method, "uri", uri)()
+	}
+
 	req, err := c.newRequest(ctx, method, uri, payload)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		debug.LogAPICall("OUTGOING", "Redfish", method, req.URL.String(), 0, time.Since(start), map[string]any{
+			"error": err.Error(),
+		})
 		if isLikelyTransientNetworkError(err) {
 			return nil, nil, 0, &Error{StatusCode: http.StatusServiceUnavailable, Message: err.Error()}
 		}
 		return nil, nil, 0, fmt.Errorf("Redfish %s failed: %w", method, err)
 	}
 	defer resp.Body.Close()
+
+	debug.LogAPICall("OUTGOING", "Redfish", method, req.URL.String(), resp.StatusCode, time.Since(start), map[string]any{
+		"location": resp.Header.Get("Location"),
+	})
 
 	rawBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {

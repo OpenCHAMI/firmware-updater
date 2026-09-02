@@ -13,11 +13,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openchami/fabrica/pkg/events"
 	"github.com/openchami/fabrica/pkg/resource"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/pkg/debug"
+	"github.com/user/firmware-updater/pkg/deviceProfiles"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 )
 
@@ -32,12 +35,41 @@ type desiredCampaignJob struct {
 
 type inventoryComponent struct {
 	Identifier       string
+	Targets          []string
+	SoftwareID       string
 	TargetURI        string
 	InstalledVersion string
-	HardwareHints    []string
 }
 
+type discoveredComponentUpdate struct {
+	Identifier                string
+	TargetURI                 string
+	OCIReference              string
+	CurrentVersion            string
+	UpdateVersion             string
+	AlreadyAtRequestedVersion bool
+	FailureDetail             string
+}
+
+type campaignDiscoveryPlan struct {
+	updates   []discoveredComponentUpdate
+	expiresAt time.Time
+}
+
+// campaignDiscoveryPlanTTL bounds how long a cached discovery plan is reused before the
+// Redfish inventory and OCI registry are consulted again.
+var campaignDiscoveryPlanTTL = 10 * time.Minute
+
+var (
+	campaignDiscoveryPlanMu sync.Mutex
+	campaignDiscoveryPlans  = make(map[string]campaignDiscoveryPlan)
+)
+
 func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx context.Context, campaign *v1.FirmwareUpdateCampaign) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("FirmwareUpdateCampaignReconciler.reconcileFirmwareUpdateCampaign", "uid", campaign.Metadata.UID, "name", campaign.Metadata.Name)()
+	}
+
 	if campaign.Status.CampaignState == "" {
 		campaign.Status.CampaignState = v1.CampaignStatePending
 	}
@@ -45,6 +77,20 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 	jobsByKey, err := r.listCampaignJobs(ctx, campaign.Metadata.UID)
 	if err != nil {
 		return fmt.Errorf("list campaign child jobs: %w", err)
+	}
+
+	// A finished campaign must not run discovery again; the periodic reconcile would otherwise
+	// re-crawl the inventory and registry and restart work that already completed.
+	if campaignIsSettled(campaign, jobsByKey) {
+		forgetCampaignDiscoveryPlans(campaign.Metadata.UID)
+		currentJobs, err := r.listCampaignJobs(ctx, campaign.Metadata.UID)
+		if err != nil {
+			return fmt.Errorf("reload campaign child jobs: %w", err)
+		}
+		summary, childJobs := summarizeCampaignJobs(currentJobs)
+		campaign.Status.Summary = summary
+		campaign.Status.ChildJobs = childJobs
+		return nil
 	}
 
 	activeTargets := buildActiveCampaignTargets(jobsByKey)
@@ -62,7 +108,11 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx c
 		campaign.Status.CampaignState = v1.CampaignStateInProgress
 	}
 
-	summary, childJobs := summarizeCampaignJobs(jobsByKey)
+	currentJobs, err := r.listCampaignJobs(ctx, campaign.Metadata.UID)
+	if err != nil {
+		return fmt.Errorf("reload campaign child jobs: %w", err)
+	}
+	summary, childJobs := summarizeCampaignJobs(currentJobs)
 
 	// Adjust summary to account for desired jobs that are queued by the sequencer
 	if len(desiredJobs) > summary.Total {
@@ -109,7 +159,9 @@ func (r *FirmwareUpdateCampaignReconciler) reconcileDesiredCampaignJobs(ctx cont
 		}
 
 		jobsByKey[desired.key] = job
-		activeTargets[targetAddress] = true
+		if campaignJobIsActive(job) {
+			activeTargets[targetAddress] = true
+		}
 		createdAny = true
 	}
 
@@ -143,41 +195,160 @@ func (r *FirmwareUpdateCampaignReconciler) desiredCampaignJobs(ctx context.Conte
 			continue
 		}
 
-		creds, err := loadBMCCredentials(target.SecretID)
+		updates, err := r.discoverTargetComponentUpdates(ctx, campaign, target)
 		if err != nil {
-			return nil, fmt.Errorf("load credentials for target %q: %w", target.TargetAddress, err)
+			return nil, err
 		}
 
-		components, err := discoverInventoryComponentsWithBackoff(ctx, target.TargetAddress, creds.Username, creds.Password)
-		if err != nil {
-			return nil, fmt.Errorf("discover firmware inventory for target %q: %w", target.TargetAddress, err)
-		}
-
-		for _, component := range components {
-			repositories := buildUniversalDiscoveryRepositories(campaign.Spec.Discovery.Repository, component.Identifier)
-			resolved, updateAvailable, err := resolvePayloadFromInventoryRepositoriesWithBackoff(ctx, repositories, component.HardwareHints, component.InstalledVersion)
-			if err != nil {
-				if statusErr, ok := err.(*firmwareproxy.HTTPStatusError); ok && statusErr.StatusCode == http.StatusNotFound {
-					continue
-				}
-				return nil, fmt.Errorf("resolve repository update for target %q component %q: %w", target.TargetAddress, component.Identifier, err)
+		for _, update := range updates {
+			key := universalCampaignChildKey(target.TargetAddress, update.TargetURI)
+			targets := []string{update.TargetURI}
+			ociReference := update.OCIReference
+			if ociReference == "" {
+				ociReference = campaign.Spec.Discovery.Repository
 			}
-			if !updateAvailable {
-				continue
-			}
-
-			key := universalCampaignChildKey(target.TargetAddress, component.TargetURI)
-			targets := []string{component.TargetURI}
-			componentName := component.Identifier
-			ociReference := resolved.OCIReference
+			job := campaignToChildJob(campaign, target, key, &ociReference, nil, update.Identifier, targets)
+			applyDiscoveredComponentStatus(job, update)
 			desired = append(desired, desiredCampaignJob{
 				key: key,
-				job: campaignToChildJob(campaign, target, key, &ociReference, nil, componentName, targets),
+				job: job,
 			})
 		}
 	}
 
 	return desired, nil
+}
+
+func applyDiscoveredComponentStatus(job *v1.FirmwareUpdateJob, update discoveredComponentUpdate) {
+	job.Status.CurrentVersion = update.CurrentVersion
+	job.Status.ErrorDetail = ""
+	job.Status.Message = ""
+	job.Status.UpdateVersion = ""
+	switch {
+	case update.FailureDetail != "":
+		job.Status.JobState = v1.CampaignStateFailed
+		job.Status.ErrorDetail = update.FailureDetail
+	case update.AlreadyAtRequestedVersion:
+		job.Status.JobState = v1.CampaignStateCompleted
+		job.Status.Message = "already at the requested version"
+	default:
+		job.Status.UpdateVersion = update.UpdateVersion
+		job.Status.ResolvedVersion = update.UpdateVersion
+	}
+}
+
+// discoverTargetComponentUpdates resolves the full set of pending component updates for a
+// target. Results are cached because the campaign reconciles on a short interval and only
+// dispatches one child job per target at a time; without the cache the Redfish inventory and
+// the OCI registry would be re-crawled on every pass.
+func (r *FirmwareUpdateCampaignReconciler) discoverTargetComponentUpdates(ctx context.Context, campaign *v1.FirmwareUpdateCampaign, target v1.FirmwareCampaignTarget) ([]discoveredComponentUpdate, error) {
+	cacheKey := campaignDiscoveryCacheKey(campaign, target)
+	if cached, ok := lookupCampaignDiscoveryPlan(cacheKey); ok {
+		return cached, nil
+	}
+
+	creds, err := loadBMCCredentials(target.SecretID)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials for target %q: %w", target.TargetAddress, err)
+	}
+	profile, err := deviceProfiles.MatchDevice(ctx, target.TargetAddress, creds.Username, creds.Password, deviceProfiles.Global)
+	if err != nil {
+		return nil, fmt.Errorf("match device profile for target %q: %w", target.TargetAddress, err)
+	}
+	_, model, err := deviceProfiles.ReadDeviceIdentity(ctx, target.TargetAddress, creds.Username, creds.Password, profile)
+	if err != nil {
+		return nil, fmt.Errorf("read device identity for target %q: %w", target.TargetAddress, err)
+	}
+
+	components, err := discoverInventoryComponentsWithBackoff(ctx, target.TargetAddress, creds.Username, creds.Password)
+	if err != nil {
+		return nil, fmt.Errorf("discover firmware inventory for target %q: %w", target.TargetAddress, err)
+	}
+
+	updates := make([]discoveredComponentUpdate, 0, len(components))
+	for _, component := range components {
+		repositories := buildUniversalDiscoveryRepositories(campaign.Spec.Discovery.Repository, component.Identifier)
+		resolved, _, err := resolvePayloadFromInventoryRepositoriesWithBackoff(ctx, repositories, component.Targets, model, component.SoftwareID, component.InstalledVersion)
+		if err != nil {
+			if statusErr, ok := err.(*firmwareproxy.HTTPStatusError); ok && statusErr.StatusCode == http.StatusNotFound {
+				updates = append(updates, discoveredComponentUpdate{
+					Identifier:     component.Identifier,
+					TargetURI:      component.TargetURI,
+					CurrentVersion: component.InstalledVersion,
+					FailureDetail:  "firmware image not found in repository",
+				})
+				continue
+			}
+			return nil, fmt.Errorf("resolve repository update for target %q component %q: %w", target.TargetAddress, component.Identifier, err)
+		}
+
+		updates = append(updates, discoveredComponentUpdate{
+			Identifier:                component.Identifier,
+			TargetURI:                 component.TargetURI,
+			OCIReference:              resolved.OCIReference,
+			CurrentVersion:            component.InstalledVersion,
+			UpdateVersion:             resolved.VersionString,
+			AlreadyAtRequestedVersion: firmwareproxy.VersionsMatch(resolved.VersionString, component.InstalledVersion),
+		})
+	}
+
+	storeCampaignDiscoveryPlan(cacheKey, updates)
+
+	return updates, nil
+}
+
+func campaignDiscoveryCacheKey(campaign *v1.FirmwareUpdateCampaign, target v1.FirmwareCampaignTarget) string {
+	repository := ""
+	if campaign.Spec.Discovery != nil {
+		repository = strings.TrimSpace(campaign.Spec.Discovery.Repository)
+	}
+	return strings.Join([]string{campaign.Metadata.UID, repository, target.TargetAddress}, "|")
+}
+
+func lookupCampaignDiscoveryPlan(key string) ([]discoveredComponentUpdate, bool) {
+	campaignDiscoveryPlanMu.Lock()
+	defer campaignDiscoveryPlanMu.Unlock()
+
+	plan, ok := campaignDiscoveryPlans[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(plan.expiresAt) {
+		delete(campaignDiscoveryPlans, key)
+		return nil, false
+	}
+
+	return append([]discoveredComponentUpdate(nil), plan.updates...), true
+}
+
+func storeCampaignDiscoveryPlan(key string, updates []discoveredComponentUpdate) {
+	campaignDiscoveryPlanMu.Lock()
+	defer campaignDiscoveryPlanMu.Unlock()
+
+	now := time.Now()
+	for existing, plan := range campaignDiscoveryPlans {
+		if now.After(plan.expiresAt) {
+			delete(campaignDiscoveryPlans, existing)
+		}
+	}
+
+	campaignDiscoveryPlans[key] = campaignDiscoveryPlan{
+		updates:   append([]discoveredComponentUpdate(nil), updates...),
+		expiresAt: now.Add(campaignDiscoveryPlanTTL),
+	}
+}
+
+func forgetCampaignDiscoveryPlans(campaignUID string) {
+	prefix := campaignUID + "|"
+
+	campaignDiscoveryPlanMu.Lock()
+	defer campaignDiscoveryPlanMu.Unlock()
+
+	for key := range campaignDiscoveryPlans {
+		if strings.HasPrefix(key, prefix) {
+			delete(campaignDiscoveryPlans, key)
+		}
+	}
 }
 
 func campaignToChildJob(campaign *v1.FirmwareUpdateCampaign, target v1.FirmwareCampaignTarget, childKey string, ociReference *string, discovery *v1.DiscoverySpec, component string, targets []string) *v1.FirmwareUpdateJob {
@@ -271,15 +442,39 @@ func summarizeCampaignJobs(jobsByTarget map[string]*v1.FirmwareUpdateJob) (v1.Ca
 			out.Pending++
 		}
 
+		errorDetail := ""
+		message := ""
+		updateVersion := ""
+		if state == v1.CampaignStateFailed {
+			errorDetail = job.Status.ErrorDetail
+		}
+		if state == v1.CampaignStateCompleted {
+			message = job.Status.Message
+		}
+		if state != v1.CampaignStateFailed {
+			updateVersion = job.Status.UpdateVersion
+		}
+
 		childJobs = append(childJobs, v1.CampaignChildJob{
-			TargetAddress: campaignChildTargetAddress(job),
-			JobUID:        job.Metadata.UID,
-			JobState:      state,
-			ErrorDetail:   job.Status.ErrorDetail,
+			TargetAddress:  campaignChildTargetAddress(job),
+			Target:         campaignChildJobTarget(job),
+			JobUID:         job.Metadata.UID,
+			JobState:       state,
+			ErrorDetail:    errorDetail,
+			Message:        message,
+			CurrentVersion: job.Status.CurrentVersion,
+			UpdateVersion:  updateVersion,
 		})
 	}
 
 	return out, childJobs
+}
+
+func campaignChildJobTarget(job *v1.FirmwareUpdateJob) string {
+	if job == nil || len(job.Spec.Targets) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(job.Spec.Targets[0])
 }
 
 func buildActiveCampaignTargets(jobsByKey map[string]*v1.FirmwareUpdateJob) map[string]bool {
@@ -327,12 +522,44 @@ func deriveCampaignState(summary v1.CampaignSummary) string {
 	return v1.CampaignStateInProgress
 }
 
-func resolvePayloadFromInventoryWithBackoff(ctx context.Context, repository string, hardwareHints []string, installedVersion string) (firmwareproxy.DiscoveryResult, bool, error) {
+func isTerminalCampaignState(state string) bool {
+	switch strings.TrimSpace(state) {
+	case v1.CampaignStateCompleted, v1.CampaignStateCompletedWithErrors, v1.CampaignStateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// campaignIsSettled reports whether the campaign reached a terminal state and every spec target
+// already has at least one child job, so that targets added after completion are still picked up.
+func campaignIsSettled(campaign *v1.FirmwareUpdateCampaign, jobsByKey map[string]*v1.FirmwareUpdateJob) bool {
+	if !isTerminalCampaignState(campaign.Status.CampaignState) {
+		return false
+	}
+
+	covered := make(map[string]bool, len(jobsByKey))
+	for _, job := range jobsByKey {
+		if address := campaignChildTargetAddress(job); address != "" {
+			covered[address] = true
+		}
+	}
+
+	for _, target := range campaign.Spec.Targets {
+		if !covered[strings.TrimSpace(target.TargetAddress)] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func resolvePayloadFromInventoryWithBackoff(ctx context.Context, repository string, targets []string, model, softwareID, installedVersion string) (firmwareproxy.DiscoveryResult, bool, error) {
 	var lastErr error
 	backoff := time.Second
 
 	for attempt := 1; attempt <= 4; attempt++ {
-		resolved, updateAvailable, err := firmwareproxy.ResolvePayloadFromInventory(ctx, repository, hardwareHints, installedVersion)
+		resolved, updateAvailable, err := firmwareproxy.ResolvePayloadFromInventory(ctx, repository, targets, model, softwareID, installedVersion)
 		if err == nil {
 			return resolved, updateAvailable, nil
 		}
@@ -351,12 +578,12 @@ func resolvePayloadFromInventoryWithBackoff(ctx context.Context, repository stri
 	return firmwareproxy.DiscoveryResult{}, false, lastErr
 }
 
-func resolvePayloadFromInventoryRepositoriesWithBackoff(ctx context.Context, repositories []string, hardwareHints []string, installedVersion string) (firmwareproxy.DiscoveryResult, bool, error) {
+func resolvePayloadFromInventoryRepositoriesWithBackoff(ctx context.Context, repositories, targets []string, model, softwareID, installedVersion string) (firmwareproxy.DiscoveryResult, bool, error) {
 	var lastErr error
 	foundNoUpdate := false
 
 	for _, repository := range repositories {
-		resolved, updateAvailable, err := resolvePayloadFromInventoryWithBackoff(ctx, repository, hardwareHints, installedVersion)
+		resolved, updateAvailable, err := resolvePayloadFromInventoryWithBackoff(ctx, repository, targets, model, softwareID, installedVersion)
 		if err == nil {
 			if updateAvailable {
 				return resolved, true, nil
@@ -442,11 +669,13 @@ func discoverInventoryComponents(ctx context.Context, targetAddress, username, p
 			stringValue(memberDetail["Name"]),
 			memberID,
 		)
+		targets := []string{stringValue(memberDetail["Id"]), stringValue(memberDetail["Name"])}
 		components = append(components, inventoryComponent{
 			Identifier:       identifier,
+			Targets:          targets,
+			SoftwareID:       stringValue(memberDetail["SoftwareId"]),
 			TargetURI:        memberID,
 			InstalledVersion: stringValue(memberDetail["Version"]),
-			HardwareHints:    collectHardwareHints(targetAddress, memberDetail),
 		})
 	}
 

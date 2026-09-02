@@ -1,5 +1,13 @@
 # Firmware Updater
 
+> **API note:** `/firmwareupdatecampaigns` and `/firmwareupdatejobs` also have
+> short-name aliases, `/campaigns` and `/jobs`. Both forms are equivalent and
+> hit the same handlers; the examples below use the long-form names.
+
+> **Firmware image API:** The service can upload, list, search, inspect, and
+> delete firmware images stored in an OCI registry. See the [Firmware Images
+> guide](docs/FirmwareImages.md) for the complete API and importer workflow.
+
 ## TL;DR: Copy/Paste Runbook
 
 Use this if you just want the shortest path to run a full-cabinet universal campaign and to see the user workflow.
@@ -149,6 +157,22 @@ Observed result from latest run:
 ## Device Profiles
 
 The firmware updater now supports device profiles that define hardware characteristics and compatibility rules for firmware updates. Device profiles are YAML-based configuration files that allow you to specify how different hardware models should be identified and matched during the firmware discovery and update process. Profiles can be loaded from the `device-profiles/` directory and enable more flexible hardware matching across diverse infrastructure environments. For detailed information about device profile structure, configuration options, and best practices, see [DeviceProfile.md](docs/DeviceProfile.md).
+
+## Firmware Image Storage and Search
+
+The firmware image API manages firmware bundles in an OCI registry. It supports upload, listing, metadata lookup, search, and deletion. See the [comprehensive Firmware Images guide](docs/FirmwareImages.md) for request formats and examples.
+
+The API is available under `/firmwareimages`. Responses use the Fabrica resource format (`apiVersion`, `kind`, `metadata`, `spec`, and `status`); list and search endpoints return arrays of `FirmwareImage` resources:
+
+```text
+POST   /firmwareimages/                                      Upload a multipart firmware image
+GET    /firmwareimages/?repository=...                       List images
+GET    /firmwareimages/search?softwareId=...&latest=true      Search and select the newest match
+GET    /firmwareimages/image?repository=...&tag=...           Read one image
+DELETE /firmwareimages/?repository=...&tag=...                Delete an image
+```
+
+For Docker Compose, use `registry:5000/firmware` from inside the updater network and `localhost:5000/firmware` from the host. OCI connections use HTTPS; set `FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true` only for a self-signed certificate.
 
 ## What `FirmwareUpdateCampaign` Supports
 

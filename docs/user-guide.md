@@ -4,6 +4,10 @@
 
 The JIT Firmware Execution Service orchestrates firmware updates directly from OCI registries to hardware controllers via the Redfish standard. It operates statelessly, meaning it does not store firmware inventory locally. Instead, it dynamically pulls the required payload from the registry and proxies the byte stream directly to the target hardware controller.
 
+> **API note:** `/firmwareupdatecampaigns` and `/firmwareupdatejobs` also have
+> short-name aliases, `/campaigns` and `/jobs`. Both forms are equivalent and
+> hit the same handlers; the examples below use the long-form names.
+
 ## 1. Prerequisites and ORAS Installation
 
 To stage firmware with custom metadata, the ORAS (OCI Registry As Storage) command-line tool is required. The target environment assumes a Linux operating system and a Quay OCI registry.
@@ -97,7 +101,65 @@ oras push quay.io/my-org/firmware/cray-bmc:1.10.2 \
 
 If firmware binaries are uploaded to the OCI registry using standard tools (like Docker) and lack the exact openchami annotations or artifact types, they can still be utilized. Explicit Mode allows you to bypass the resolution engine by providing the exact OCI repository path and tag (or SHA digest) in your update command.
 
-## 4. Executing Firmware Updates
+## 4. Firmware Image Storage and Search API
+
+The service provides a registry-backed API for managing firmware images. It does not copy image metadata into SQLite. Responses use the Fabrica resource format with `apiVersion`, `kind`, `metadata`, `spec`, and `status`; list and search endpoints return arrays of `FirmwareImage` resources. The complete endpoint reference, metadata mapping, and importer instructions are in [FirmwareImages.md](FirmwareImages.md).
+
+### Configure the registry
+
+The server uses `--registry-host` or `FIRMWARE_UPDATER_REGISTRY_HOST` when listing every repository. A repository supplied directly to an upload, list, search, get, or delete request must include both the registry host and repository path, for example `registry:5000/firmware`.
+
+OCI communication uses HTTPS by default. Set `FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true` only when the registry uses a self-signed certificate; this accepts the certificate without changing the connection to HTTP. In Docker Compose, use `registry:5000` from the updater container. From the host, the published registry is `localhost:5000`.
+
+### Store an image
+
+Upload `multipart/form-data` with a JSON `metadata` part and a `file` part:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/firmwareimages/ \
+  -F 'metadata={"repository":"127.0.0.1:5000/firmware/ilo","tag":"3.0.1","version":"3.0.1","targets":["iLO 5"],"models":["ProLiant DL325 Gen10"],"softwareIds":["ilo5"],"versionString":"3.0.1 (vendor)","manufacturer":"hpe","deviceType":"nodeBMC","tags":["production"]};type=application/json' \
+  -F 'file=@./dummy-firmware.bin;type=application/octet-stream'
+```
+
+`repository`, `tag`, `version`, `targets`, and the file are required. The upload creates an OCI firmware bundle manifest and stores the filename on the payload layer. The public metadata fields are `targets`, `models`, `softwareIds`, and `versionString`; the legacy OCI compatibility annotation remains internal so existing discovery continues to work.
+
+### List and search images
+
+```bash
+curl -sS 'http://127.0.0.1:8090/firmwareimages/?repository=127.0.0.1:5000/firmware' | jq
+curl -sS 'http://localhost:8090/firmwareimages/search?repository=127.0.0.1:5000/firmware&softwareId=ilo5&target=iLO%205' | jq
+```
+
+Search filters use AND semantics. Supported filters are `manufacturer`, `deviceType`, `model`, `target`, `softwareId`, `version`, `versionString`, `tag`, and `filename`. Use `latest=true` to return only the highest valid semantic `version` after applying the other filters:
+
+```bash
+curl -sS 'http://localhost:8090/firmwareimages/search?repository=127.0.0.1:5000/firmware&softwareId=ilo5&latest=true' | jq
+```
+
+Use `&` between query parameters, not a second `?`. For example, `?version=2.1.0-59&softwareId=sc:*:*:*` applies both filters.
+
+### Import an image catalog
+
+The repository includes `tools/upload_images_to_registry.py` for importing `images.json`. It maps the catalog's `target`, `models`, `softwareIds`, `firmwareVersion`, and `semanticFirmwareVersion` fields to the API. Payloads are resolved by the filename in each `s3URL`.
+
+```bash
+python tools/upload_images_to_registry.py \
+  --images images.json \
+  --payload-dir firmware \
+  --repository registry:5000/firmware
+```
+
+If a payload is absent, the importer creates a zero-byte placeholder with the `s3URL` filename and uploads it. Use `--dry-run` to review the catalog without creating files or calling the API. Use `--continue-on-error` to process all entries after an error.
+
+### Delete an image
+
+```bash
+curl -i -X DELETE 'http://127.0.0.1:8090/firmwareimages/?repository=127.0.0.1:5000/firmware/ilo&tag=3.0.1'
+```
+
+Deletion returns `204 No Content` for a unique manifest. If multiple tags point to the same digest, it returns `409 Conflict` unless `force=true` is explicitly supplied. Registry garbage collection is not triggered by the service.
+
+## 5. Executing Firmware Updates
 
 Updates are triggered by submitting a JSON payload to the service API to create a `FirmwareUpdateJob` resource.
 
@@ -163,7 +225,7 @@ curl -sS -X POST http://127.0.0.1:8090/firmwareupdatejobs/ \
 
 ```
 
-## 5. Monitoring and Validation
+## 6. Monitoring and Validation
 
 When a job is successfully created, the POST command will return a JSON object containing a `uid` (e.g., `firmwareupdatejob-8eab5b0e`).
 
@@ -176,7 +238,7 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/firmwareupdatejob-8eab5b0e
 
 The output will display a `status` block indicating the `jobState`. The states progress from `Pending` to `Resolving`, and then to either `InProgress`, `Completed`, or `Failed`. If a job fails, the exact network or Redfish error returned by the target hardware will be recorded in the `errorDetail` field.
 
-## 6. Bulk Cabinet Campaigns
+## 7. Bulk Cabinet Campaigns
 
 `FirmwareUpdateCampaign` is the bulk orchestration resource for cabinet-wide updates. It captures the shared payload settings once and fans the update out to each target listed in `spec.targets`.
 

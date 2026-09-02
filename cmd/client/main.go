@@ -130,6 +130,7 @@ func init() {
 	// Environment variable support
 	viper.SetEnvPrefix("FIRMWARE_UPDATER")
 	viper.AutomaticEnv()
+	viper.BindEnv("debug", "FIRMWARE_UPDATER_DEBUG")
 
 	// Add resource commands
 	rootCmd.AddCommand(healthCmd)

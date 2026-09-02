@@ -20,6 +20,7 @@ import (
 	"github.com/openchami/fabrica/pkg/events"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/internal/secretsruntime"
+	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/deviceProfiles"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 	"github.com/user/firmware-updater/pkg/redfish"
@@ -65,6 +66,10 @@ type bmcCredentials struct {
 // Returns:
 //   - error: If reconciliation failed (will trigger retry with backoff)
 func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Context, res *v1.FirmwareUpdateJob) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("FirmwareUpdateJobReconciler.reconcileFirmwareUpdateJob", "uid", res.GetUID(), "name", res.GetName())()
+	}
+
 	if res.Status.JobState == "" {
 		res.Status.JobState = "Pending"
 	}
@@ -123,6 +128,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = err.Error()
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 				return fmt.Errorf("set terminal failure after ORAS resolve error: %w", updateErr)
 			}
@@ -131,6 +138,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 		res.Status.ErrorDetail = err.Error()
 		res.Status.JobState = "Failed"
+		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("persist exhausted ORAS transient error as failed: %w", updateErr)
 		}
@@ -147,6 +156,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = err.Error()
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 				return fmt.Errorf("set terminal failure after credential load error: %w", updateErr)
 			}
@@ -155,6 +166,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 		res.Status.ErrorDetail = err.Error()
 		res.Status.JobState = "Failed"
+		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("persist credential load error as failed: %w", updateErr)
 		}
@@ -169,6 +182,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	if err != nil {
 		res.Status.JobState = "Failed"
 		res.Status.ErrorDetail = fmt.Sprintf("device profile match failed: %v", err)
+		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("set terminal failure after device profile match error: %w", updateErr)
 		}
@@ -188,6 +203,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 			if isTerminalError(err) {
 				res.Status.JobState = "Failed"
 				res.Status.ErrorDetail = err.Error()
+				res.Status.Message = ""
+				res.Status.UpdateVersion = ""
 				if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 					return fmt.Errorf("set terminal failure after FirmwareInventory discovery error: %w", updateErr)
 				}
@@ -196,6 +213,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 			res.Status.ErrorDetail = err.Error()
 			res.Status.JobState = "Failed"
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 				return fmt.Errorf("persist exhausted FirmwareInventory discovery transient error as failed: %w", updateErr)
 			}
@@ -210,6 +229,8 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	if err != nil {
 		res.Status.JobState = "Failed"
 		res.Status.ErrorDetail = err.Error()
+		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("set terminal failure after payload build error: %w", updateErr)
 		}
@@ -233,6 +254,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = err.Error()
 			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 				return fmt.Errorf("set terminal failure after Redfish dispatch error: %w", updateErr)
 			}
@@ -242,6 +264,7 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		res.Status.ErrorDetail = err.Error()
 		res.Status.JobState = "Failed"
 		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		if updateErr := r.updateJobStatus(ctx, res); updateErr != nil {
 			return fmt.Errorf("persist exhausted Redfish transient error as failed: %w", updateErr)
 		}
@@ -269,11 +292,7 @@ func (r *FirmwareUpdateJobReconciler) updateJobStatus(ctx context.Context, res *
 		return err
 	}
 
-	if !jobReleasedTarget(previousState, res.Status.JobState) {
-		return nil
-	}
-
-	if err := r.notifyOwningCampaignTargetReleased(ctx, res, previousState); err != nil {
+	if err := r.notifyOwningCampaignStatusChanged(ctx, res, previousState); err != nil {
 		r.Logger.Warnf("Failed to notify owning FirmwareUpdateCampaign for child job %s: %v", res.GetUID(), err)
 	}
 
@@ -298,7 +317,7 @@ func (r *FirmwareUpdateJobReconciler) loadStoredJobState(ctx context.Context, re
 	return strings.TrimSpace(job.Status.JobState), nil
 }
 
-func (r *FirmwareUpdateJobReconciler) notifyOwningCampaignTargetReleased(ctx context.Context, res *v1.FirmwareUpdateJob, previousState string) error {
+func (r *FirmwareUpdateJobReconciler) notifyOwningCampaignStatusChanged(ctx context.Context, res *v1.FirmwareUpdateJob, previousState string) error {
 	campaignUID := strings.TrimSpace(res.Metadata.Annotations[v1.CampaignUIDAnnotation])
 	if campaignUID == "" || r.Client == nil {
 		return nil
@@ -324,10 +343,6 @@ func (r *FirmwareUpdateJobReconciler) notifyOwningCampaignTargetReleased(ctx con
 	return events.PublishResourceUpdated(ctx, "FirmwareUpdateCampaign", campaign.Metadata.UID, campaign.Metadata.Name, campaign, metadata)
 }
 
-func jobReleasedTarget(previousState, currentState string) bool {
-	return jobStateIsActive(previousState) && !jobStateIsActive(currentState)
-}
-
 func jobStateIsActive(state string) bool {
 	trimmed := strings.TrimSpace(state)
 	return trimmed != v1.CampaignStateCompleted && trimmed != v1.CampaignStateFailed
@@ -339,6 +354,8 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = err.Error()
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			return nil
 		}
 
@@ -351,6 +368,8 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 			if isTerminalError(err) {
 				res.Status.JobState = "Failed"
 				res.Status.ErrorDetail = fmt.Sprintf("poll Redfish task failed: %v", err)
+				res.Status.Message = ""
+				res.Status.UpdateVersion = ""
 				return nil
 			}
 
@@ -361,6 +380,7 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		case redfishTaskStateCompleted:
 			res.Status.JobState = "Completed"
 			res.Status.ErrorDetail = ""
+			res.Status.Message = ""
 			return nil
 		case redfishTaskStateFailed:
 			res.Status.JobState = "Failed"
@@ -368,6 +388,8 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 			if res.Status.ErrorDetail == "" {
 				res.Status.ErrorDetail = "Redfish task reported failure"
 			}
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			return nil
 		case redfishTaskStateRunning:
 			return nil
@@ -381,6 +403,8 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
 			res.Status.ErrorDetail = fmt.Sprintf("verify firmware inventory failed: %v", err)
+			res.Status.Message = ""
+			res.Status.UpdateVersion = ""
 			return nil
 		}
 
@@ -393,12 +417,15 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		if res.Status.ErrorDetail == "" {
 			res.Status.ErrorDetail = "Redfish inventory reported failure"
 		}
+		res.Status.Message = ""
+		res.Status.UpdateVersion = ""
 		return nil
 	}
 
 	if verification.Updated {
 		res.Status.JobState = "Completed"
 		res.Status.ErrorDetail = ""
+		res.Status.Message = ""
 	}
 
 	return nil

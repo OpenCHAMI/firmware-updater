@@ -17,6 +17,7 @@ import (
 	"time"
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/pkg/debug"
 )
 
 // ErrNoMatch is returned by MatchDevice when no enabled profile matches.
@@ -34,6 +35,10 @@ var httpClient = &http.Client{
 // MatchDevice probes the target BMC and returns the first enabled profile whose
 // Verification rule matches. It returns ErrNoMatch if none match.
 func MatchDevice(ctx context.Context, targetAddress, username, password string, reg *Registry) (v1.DeviceProfile, error) {
+	if debug.IsEnabled() {
+		defer debug.Trace("deviceProfiles.MatchDevice", "targetAddress", targetAddress)()
+	}
+
 	for _, p := range reg.List() {
 		if !p.Spec.Enabled {
 			continue

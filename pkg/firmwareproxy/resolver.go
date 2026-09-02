@@ -2,17 +2,20 @@ package firmwareproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/semverutil"
 	"golang.org/x/mod/semver"
 	"oras.land/oras-go/v2"
@@ -23,10 +26,15 @@ import (
 
 const FirmwareBundleArtifactType = "application/vnd.openchami.firmware.bundle.v1+json"
 
+const envRepositoryInsecureTLS = "FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS"
+
 const (
-	annotationCompatibleHardware = "dev.fabrica.hardware.compatible"
-	annotationImageVersion       = "org.opencontainers.image.version"
-	annotationImageTitle         = "org.opencontainers.image.title"
+	annotationCompatibleHardware    = "dev.fabrica.hardware.compatible"
+	annotationFirmwareModels        = "dev.fabrica.firmware.models"
+	annotationFirmwareSoftwareID    = "dev.fabrica.firmware.softwareIds"
+	annotationFirmwareVersionString = "dev.fabrica.firmware.versionString"
+	annotationImageVersion          = "org.opencontainers.image.version"
+	annotationImageTitle            = "org.opencontainers.image.title"
 )
 
 type HTTPStatusError struct {
@@ -50,6 +58,7 @@ type payloadLocation struct {
 
 type DiscoveryResult struct {
 	Version         string
+	VersionString   string
 	Digest          string
 	OCIReference    string
 	PayloadFilename string
@@ -58,9 +67,16 @@ type DiscoveryResult struct {
 type manifestCandidate struct {
 	tag               string
 	versionRaw        string
+	versionString     string
 	versionNormalized string
 	payloadDigest     string
 	payloadFilename   string
+}
+
+type inventoryIdentity struct {
+	targets    []string
+	model      string
+	softwareID string
 }
 
 type authConfig struct {
@@ -72,6 +88,16 @@ var payloadIndex sync.Map
 var authState sync.RWMutex
 var globalAuthConfig authConfig
 
+// insecureRegistryHTTPClient is used only when the explicit insecure OCI
+// transport override is enabled to accept an untrusted registry certificate.
+var insecureRegistryHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		// INSECURE CALL: TLS verification disabled for OCI registry connections.
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // INSECURE CALL: fix later
+	},
+}
+
 // InitAuth configures global OCI registry credentials used by ORAS remote repositories.
 func InitAuth(username, password string) {
 	authState.Lock()
@@ -82,18 +108,49 @@ func InitAuth(username, password string) {
 	authState.Unlock()
 }
 
+// NewRepository creates an authenticated OCI repository client.
+func NewRepository(reference string) (*remote.Repository, error) {
+	repo, err := remote.NewRepository(strings.TrimSpace(reference))
+	if err != nil {
+		return nil, err
+	}
+	// OCI registries are always contacted over HTTPS. The insecure override
+	// changes certificate verification in applyRepoAuth, not the protocol.
+	repo.PlainHTTP = false
+	applyRepoAuth(repo)
+	return repo, nil
+}
+
+// NewRegistry creates an authenticated OCI registry client.
+func NewRegistry(host string) (*remote.Registry, error) {
+	registryClient, err := remote.NewRegistry(strings.TrimSpace(host))
+	if err != nil {
+		return nil, err
+	}
+	registryClient.PlainHTTP = false
+
+	probeRepo, err := NewRepository(strings.TrimSpace(host) + "/firmware-updater-auth-probe")
+	if err != nil {
+		return nil, err
+	}
+	registryClient.Client = probeRepo.Client
+	return registryClient, nil
+}
+
 func ResolvePayload(ctx context.Context, ociReference string) (DiscoveryResult, error) {
+	if debug.IsEnabled() {
+		defer debug.Trace("firmwareproxy.ResolvePayload", "ociReference", ociReference)()
+	}
+
 	parsed, err := registry.ParseReference(ociReference)
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("parse OCI reference: %w", err)
 	}
 
-	repo, err := remote.NewRepository(parsed.Registry + "/" + parsed.Repository)
+	repo, err := NewRepository(parsed.Registry + "/" + parsed.Repository)
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(parsed.Registry)
-	applyRepoAuth(repo)
 
 	reference := parsed.ReferenceOrDefault()
 	_, manifestBytes, err := oras.FetchBytes(ctx, repo, reference, oras.FetchBytesOptions{})
@@ -124,12 +181,14 @@ func ResolvePayload(ctx context.Context, ociReference string) (DiscoveryResult, 
 }
 
 func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {
-	repo, err := remote.NewRepository(strings.TrimSpace(repository))
+	if debug.IsEnabled() {
+		defer debug.Trace("firmwareproxy.ResolvePayloadFromDiscovery", "repository", repository, "hardwareModel", hardwareModel, "versionTarget", versionTarget)()
+	}
+
+	repo, err := NewRepository(repository)
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
-	applyRepoAuth(repo)
 
 	var tags []string
 	if err := repo.Tags(ctx, "", func(batch []string) error {
@@ -171,19 +230,22 @@ func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel,
 
 	return DiscoveryResult{
 		Version:         selected.versionRaw,
+		VersionString:   selected.versionString,
 		Digest:          selected.payloadDigest,
 		OCIReference:    fmt.Sprintf("%s:%s", repository, selected.tag),
 		PayloadFilename: selected.payloadFilename,
 	}, nil
 }
 
-func ResolvePayloadFromInventory(ctx context.Context, repository string, hardwareHints []string, installedVersion string) (DiscoveryResult, bool, error) {
-	repo, err := remote.NewRepository(strings.TrimSpace(repository))
+func ResolvePayloadFromInventory(ctx context.Context, repository string, targets []string, model, softwareID, installedVersion string) (DiscoveryResult, bool, error) {
+	if debug.IsEnabled() {
+		defer debug.Trace("firmwareproxy.ResolvePayloadFromInventory", "repository", repository, "targets", targets, "model", model, "softwareID", softwareID, "installedVersion", installedVersion)()
+	}
+
+	repo, err := NewRepository(repository)
 	if err != nil {
 		return DiscoveryResult{}, false, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
-	applyRepoAuth(repo)
 
 	var tags []string
 	if err := repo.Tags(ctx, "", func(batch []string) error {
@@ -209,22 +271,27 @@ func ResolvePayloadFromInventory(ctx context.Context, repository string, hardwar
 			continue
 		}
 
-		candidate, ok := buildManifestCandidateForHints(manifest, tag, hardwareHints)
+		candidate, ok := buildManifestCandidateForInventory(manifest, tag, inventoryIdentity{
+			targets:    targets,
+			model:      model,
+			softwareID: softwareID,
+		})
 		if !ok {
 			continue
 		}
 		candidates = append(candidates, candidate)
 	}
 
-	selected, updateAvailable, err := selectNewerManifestCandidate(candidates, installedVersion)
-	if err != nil || !updateAvailable {
-		return DiscoveryResult{}, updateAvailable, err
+	selected, err := selectManifestCandidate(candidates, "latest")
+	if err != nil {
+		return DiscoveryResult{}, false, err
 	}
 
 	payloadIndex.Store(selected.payloadDigest, payloadLocation{Repository: repository})
 
 	return DiscoveryResult{
 		Version:         selected.versionRaw,
+		VersionString:   selected.versionString,
 		Digest:          selected.payloadDigest,
 		OCIReference:    fmt.Sprintf("%s:%s", repository, selected.tag),
 		PayloadFilename: selected.payloadFilename,
@@ -254,13 +321,14 @@ func buildManifestCandidate(manifest ocispec.Manifest, tag, hardwareModel string
 	return manifestCandidate{
 		tag:               tag,
 		versionRaw:        versionRaw,
+		versionString:     strings.TrimSpace(manifest.Annotations[annotationFirmwareVersionString]),
 		versionNormalized: versionNormalized,
 		payloadDigest:     manifest.Layers[0].Digest.String(),
 		payloadFilename:   strings.TrimSpace(manifest.Layers[0].Annotations[annotationImageTitle]),
 	}, true
 }
 
-func buildManifestCandidateForHints(manifest ocispec.Manifest, tag string, hardwareHints []string) (manifestCandidate, bool) {
+func buildManifestCandidateForInventory(manifest ocispec.Manifest, tag string, identity inventoryIdentity) (manifestCandidate, bool) {
 	if manifest.ArtifactType != FirmwareBundleArtifactType {
 		return manifestCandidate{}, false
 	}
@@ -269,8 +337,15 @@ func buildManifestCandidateForHints(manifest ocispec.Manifest, tag string, hardw
 		return manifestCandidate{}, false
 	}
 
-	compatible := strings.TrimSpace(manifest.Annotations[annotationCompatibleHardware])
-	if !isCompatibleHardwareAny(compatible, hardwareHints) {
+	if !isCompatibleHardwareAny(manifest.Annotations[annotationCompatibleHardware], identity.targets) {
+		return manifestCandidate{}, false
+	}
+
+	if strings.TrimSpace(identity.softwareID) != "" {
+		if !isCompatibleHardware(manifest.Annotations[annotationFirmwareSoftwareID], identity.softwareID) {
+			return manifestCandidate{}, false
+		}
+	} else if !isCompatibleHardware(manifest.Annotations[annotationFirmwareModels], identity.model) {
 		return manifestCandidate{}, false
 	}
 
@@ -283,6 +358,7 @@ func buildManifestCandidateForHints(manifest ocispec.Manifest, tag string, hardw
 	return manifestCandidate{
 		tag:               tag,
 		versionRaw:        versionRaw,
+		versionString:     strings.TrimSpace(manifest.Annotations[annotationFirmwareVersionString]),
 		versionNormalized: versionNormalized,
 		payloadDigest:     manifest.Layers[0].Digest.String(),
 		payloadFilename:   strings.TrimSpace(manifest.Layers[0].Annotations[annotationImageTitle]),
@@ -338,7 +414,12 @@ func selectNewerManifestCandidate(candidates []manifestCandidate, installedVersi
 		}
 	}
 
-	return manifestCandidate{}, false, nil
+	return candidates[0], false, nil
+}
+
+// VersionsMatch reports whether registry and Redfish firmware version strings match.
+func VersionsMatch(registryVersion, redfishVersion string) bool {
+	return strings.TrimSpace(registryVersion) == strings.TrimSpace(redfishVersion)
 }
 
 func sortManifestCandidates(candidates []manifestCandidate) {
@@ -405,12 +486,10 @@ func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, i
 		return nil, 0, fmt.Errorf("invalid payload index entry for digest %q", digestStr)
 	}
 
-	repo, err := remote.NewRepository(loc.Repository)
+	repo, err := NewRepository(loc.Repository)
 	if err != nil {
 		return nil, 0, fmt.Errorf("create ORAS repository client: %w", err)
 	}
-	repo.PlainHTTP = isLoopbackRegistry(repo.Reference.Registry)
-	applyRepoAuth(repo)
 
 	desc, err := repo.Blobs().Resolve(ctx, digestStr)
 	if err != nil {
@@ -423,19 +502,6 @@ func StreamPayloadLayer(ctx context.Context, digestStr string) (io.ReadCloser, i
 	}
 
 	return rc, desc.Size, nil
-}
-
-func isLoopbackRegistry(registryHost string) bool {
-	host := registryHost
-	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
-		trimmed := strings.TrimPrefix(host, "[")
-		host = strings.SplitN(trimmed, "]", 2)[0]
-	} else if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-
-	host = strings.TrimSpace(host)
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func classifyORASError(err error) error {
@@ -480,17 +546,46 @@ func applyRepoAuth(repo *remote.Repository) {
 	username := globalAuthConfig.username
 	password := globalAuthConfig.password
 	authState.RUnlock()
+	useInsecureTLS := repositoryInsecureTLS()
 
 	if username == "" || password == "" {
+		if !useInsecureTLS {
+			return
+		}
+
+		repo.Client = &auth.Client{
+			Client: insecureRegistryHTTPClient,
+			Cache:  auth.NewCache(),
+		}
 		return
 	}
 
-	repo.Client = &auth.Client{
-		Client: http.DefaultClient,
+	httpClient := http.DefaultClient
+	if useInsecureTLS {
+		httpClient = insecureRegistryHTTPClient
+	}
+
+	client := &auth.Client{
+		Client: httpClient,
 		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
 			Username: username,
 			Password: password,
 		}),
 		Cache: auth.NewCache(),
 	}
+	repo.Client = client
+}
+
+func repositoryInsecureTLS() bool {
+	value := strings.TrimSpace(os.Getenv(envRepositoryInsecureTLS))
+	if value == "" {
+		return false
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err == nil {
+		return parsed
+	}
+
+	return false
 }

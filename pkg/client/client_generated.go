@@ -62,11 +62,13 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 
-	"github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/pkg/debug"
 )
 
 // Client provides access to the inventory API
@@ -195,11 +197,19 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 		c.logger.Debug().Msg("No body in request")
 	}
 
+	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if debug.IsEnabled() {
+			debug.LogAPICall("OUTGOING", "Client", method, u.String(), 0, time.Since(start), map[string]any{"error": err.Error()})
+		}
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if debug.IsEnabled() {
+		debug.LogAPICall("OUTGOING", "Client", method, u.String(), resp.StatusCode, time.Since(start), nil)
+	}
 
 	// Debug info for response
 	if resp != nil {

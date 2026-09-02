@@ -46,7 +46,9 @@ type FirmwareUpdateJobStatus struct {
 	TaskID          string `json:"taskID,omitempty"`
 	ErrorDetail     string `json:"errorDetail,omitempty"`
 	Message         string `json:"message,omitempty"`
-	ResolvedVersion string `json:"resolvedVersion,omitempty"`
+	CurrentVersion  string `json:"currentVersion,omitempty"`
+	UpdateVersion   string `json:"updateVersion,omitempty"`
+	ResolvedVersion string `json:"-"`
 	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
 	PayloadFilename string `json:"payloadFilename,omitempty"`
 	DeviceProfileID string `json:"deviceProfileID,omitempty"`

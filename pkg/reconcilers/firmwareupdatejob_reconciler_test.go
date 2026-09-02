@@ -423,7 +423,7 @@ func TestVerifyFirmwareTargetsUpdatedWithBackoffRespectsParentContextTimeout(t *
 	}
 }
 
-func TestUpdateJobStatusNotifiesOwningCampaignWhenJobFails(t *testing.T) {
+func TestUpdateJobStatusNotifiesOwningCampaignWhenJobStatusChanges(t *testing.T) {
 	ctx := context.Background()
 	client, cleanup := setupReconcilerTestStorageClient(t)
 	defer cleanup()
@@ -470,7 +470,7 @@ func TestUpdateJobStatusNotifiesOwningCampaignWhenJobFails(t *testing.T) {
 			},
 		},
 		Status: v1.FirmwareUpdateJobStatus{
-			JobState: "InProgress",
+			JobState: "Pending",
 		},
 	}
 	if err := client.Create(ctx, job); err != nil {
@@ -490,7 +490,7 @@ func TestUpdateJobStatusNotifiesOwningCampaignWhenJobFails(t *testing.T) {
 		t.Fatalf("subscribe events: %v", err)
 	}
 
-	job.Status.JobState = "Failed"
+	job.Status.JobState = "Resolving"
 	reconciler := NewDefaultFirmwareUpdateJobReconciler(client, bus)
 	if err := reconciler.updateJobStatus(ctx, job); err != nil {
 		t.Fatalf("updateJobStatus returned error: %v", err)
