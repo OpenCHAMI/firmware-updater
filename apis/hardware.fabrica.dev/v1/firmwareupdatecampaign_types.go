@@ -68,10 +68,14 @@ type CampaignSummary struct {
 
 // CampaignChildJob captures linked child FirmwareUpdateJob status.
 type CampaignChildJob struct {
-	TargetAddress string `json:"targetAddress"`
-	JobUID        string `json:"jobUID"`
-	JobState      string `json:"jobState"`
-	ErrorDetail   string `json:"errorDetail,omitempty"`
+	TargetAddress  string `json:"targetAddress"`
+	Target         string `json:"target,omitempty"`
+	JobUID         string `json:"jobUID"`
+	JobState       string `json:"jobState"`
+	ErrorDetail    string `json:"errorDetail,omitempty"`
+	Message        string `json:"message,omitempty"`
+	CurrentVersion string `json:"currentVersion,omitempty"`
+	UpdateVersion  string `json:"updateVersion,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateCampaign.
