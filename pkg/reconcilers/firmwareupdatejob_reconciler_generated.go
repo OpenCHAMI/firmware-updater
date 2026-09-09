@@ -21,6 +21,7 @@ import (
 	"github.com/openchami/fabrica/pkg/events"
 	"github.com/openchami/fabrica/pkg/reconcile"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/pkg/debug"
 )
 
 // FirmwareUpdateJobReconciler reconciles FirmwareUpdateJob resources.
@@ -85,6 +86,10 @@ func (r *FirmwareUpdateJobReconciler) GetResourceKind() string {
 //   - Result: Indicates if/when to requeue
 //   - error: If reconciliation failed
 func (r *FirmwareUpdateJobReconciler) Reconcile(ctx context.Context, resource interface{}) (reconcile.Result, error) {
+	if debug.IsEnabled() {
+		defer debug.Trace("FirmwareUpdateJobReconciler.Reconcile")()
+	}
+
 	// 1. Assert to raw message
 	raw, ok := resource.(json.RawMessage)
 	if !ok {

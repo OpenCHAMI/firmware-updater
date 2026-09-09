@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/user/firmware-updater/pkg/debug"
 	"gopkg.in/yaml.v3"
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
@@ -62,6 +63,10 @@ Examples:
 }
 
 func runImport(ctx context.Context, input, mode string, dryRun, skipExisting bool) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("main.runImport", "input", input, "mode", mode, "dryRun", dryRun)()
+	}
+
 	fmt.Printf("🚀 Importing resources...\n")
 	fmt.Printf("   Input: %s\n", input)
 	fmt.Printf("   Mode: %s\n", mode)
