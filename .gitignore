@@ -47,3 +47,6 @@ registry-data/
 # Local vault migration input
 tools/vaulted_secrets.yml
 tools/vaulted_secrets.local.yml
+
+firmware/
+certs/
