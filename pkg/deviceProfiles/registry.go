@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/pkg/debug"
 )
 
 // Registry is a thread-safe in-memory store of loaded DeviceProfiles.
@@ -28,6 +29,10 @@ var Global = NewRegistry()
 // Register adds a profile to the registry. It returns an error if a profile
 // with the same ProfileID already exists.
 func (r *Registry) Register(p v1.DeviceProfile) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("deviceProfiles.Registry.Register", "profileID", p.Spec.ProfileID)()
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

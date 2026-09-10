@@ -43,6 +43,7 @@ import (
 	. "github.com/user/firmware-updater/internal/middleware"
 
 	"github.com/openchami/fabrica/pkg/reconcile"
+	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 	"github.com/user/firmware-updater/pkg/reconcilers"
 )
@@ -72,6 +73,7 @@ type Config struct {
 	// Registry authentication (optional)
 	QuayUsername string `mapstructure:"quay_username"`
 	QuayPassword string `mapstructure:"quay_password"`
+	RegistryHost string `mapstructure:"registry_host"`
 
 	// Secret store configuration
 	SecretsFile string `mapstructure:"secrets-file"`
@@ -99,6 +101,7 @@ func DefaultConfig() *Config {
 
 		QuayUsername: "",
 		QuayPassword: "",
+		RegistryHost: "",
 		SecretsFile:  "secrets.json",
 
 		DeviceProfilesDir: "./device-profiles",
@@ -148,6 +151,7 @@ func init() {
 	serveCmd.Flags().String("database-url", "", "Database connection URL")
 	serveCmd.Flags().String("secrets-file", "secrets.json", "Path to encrypted secrets store JSON file")
 	serveCmd.Flags().String("device-profiles-dir", "./device-profiles", "Directory to scan for device profile .yaml/.yml files")
+	serveCmd.Flags().String("registry-host", "", "OCI registry host used when listing all firmware image repositories")
 
 	// Bind flags to viper
 	viper.BindPFlags(serveCmd.Flags())
@@ -185,8 +189,10 @@ func initConfig() {
 	viper.SetEnvPrefix("FIRMWARE_UPDATER")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
+	viper.BindEnv("debug", "FIRMWARE_UPDATER_DEBUG")
 	viper.BindEnv("quay_username")
 	viper.BindEnv("quay_password")
+	viper.BindEnv("registry_host")
 	viper.BindEnv("secrets-file")
 	viper.BindEnv("redfish_http_timeout")
 
@@ -208,6 +214,10 @@ func initConfig() {
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("main.runServer")()
+	}
+
 	log.Printf("Starting firmware-updater server...")
 	firmwareproxy.InitAuth(config.QuayUsername, config.QuayPassword)
 
@@ -338,6 +348,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	r := chi.NewRouter()
 
 	// Add middleware
+	r.Use(DebugLoggingMiddleware)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
@@ -357,6 +368,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	RegisterGeneratedRoutes(r)
 	registerFirmwareProxyRoute(r)
 	RegisterDeviceProfileRoutes(r)
+	RegisterCampaignJobAliasRoutes(r) // short-name aliases: /campaigns, /jobs
+	RegisterFirmwareImageRoutes(r, config.RegistryHost)
 	r.Get("/health", healthHandler)
 
 	// Create HTTP server

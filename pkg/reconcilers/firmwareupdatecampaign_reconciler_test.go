@@ -3,7 +3,9 @@ package reconcilers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -20,8 +22,8 @@ func TestSummarizeCampaignJobsCountsChildJobs(t *testing.T) {
 	jobs := map[string]*v1.FirmwareUpdateJob{
 		"10.0.0.1|bmc": {
 			Metadata: v1.FirmwareUpdateJob{}.Metadata,
-			Spec:     v1.FirmwareUpdateJobSpec{TargetAddress: "10.0.0.1"},
-			Status:   v1.FirmwareUpdateJobStatus{JobState: v1.CampaignStateCompleted},
+			Spec:     v1.FirmwareUpdateJobSpec{TargetAddress: "10.0.0.1", Targets: []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"}},
+			Status:   v1.FirmwareUpdateJobStatus{JobState: v1.CampaignStateCompleted, Message: "already at the requested version", CurrentVersion: "1.2.3"},
 		},
 		"10.0.0.1|bios": {
 			Metadata: v1.FirmwareUpdateJob{}.Metadata,
@@ -44,6 +46,25 @@ func TestSummarizeCampaignJobsCountsChildJobs(t *testing.T) {
 	}
 	if len(childJobs) != 3 {
 		t.Fatalf("expected 3 child jobs, got %d", len(childJobs))
+	}
+	var completedChild *v1.CampaignChildJob
+	for index := range childJobs {
+		if childJobs[index].JobState == v1.CampaignStateCompleted {
+			completedChild = &childJobs[index]
+			break
+		}
+	}
+	if completedChild == nil {
+		t.Fatal("expected a completed child job")
+	}
+	if completedChild.Target != "/redfish/v1/UpdateService/FirmwareInventory/BMC" {
+		t.Fatalf("expected Redfish target in child job, got %q", completedChild.Target)
+	}
+	if completedChild.Message != "already at the requested version" {
+		t.Fatalf("expected child job message, got %q", completedChild.Message)
+	}
+	if completedChild.CurrentVersion != "1.2.3" {
+		t.Fatalf("expected current version in child job, got %q", completedChild.CurrentVersion)
 	}
 }
 
@@ -242,6 +263,63 @@ func TestCampaignToChildJob_PropagatesDryRun(t *testing.T) {
 	child := campaignToChildJob(campaign, target, "10.0.0.10", strPtr("registry.example.com/fw/image:v1"), nil, "BMC", nil)
 	if !child.Spec.DryRun {
 		t.Fatalf("expected child job dryrun to be true when campaign dryrun is true")
+	}
+}
+
+func TestApplyDiscoveredComponentStatus(t *testing.T) {
+	completed := &v1.FirmwareUpdateJob{}
+	applyDiscoveredComponentStatus(completed, discoveredComponentUpdate{AlreadyAtRequestedVersion: true, CurrentVersion: "1.2.3"})
+	if completed.Status.JobState != v1.CampaignStateCompleted || completed.Status.Message != "already at the requested version" {
+		t.Fatalf("expected completed already-current job, got %+v", completed.Status)
+	}
+	if completed.Status.CurrentVersion != "1.2.3" || completed.Status.UpdateVersion != "" {
+		t.Fatalf("expected only Redfish version for completed job, got %+v", completed.Status)
+	}
+
+	update := &v1.FirmwareUpdateJob{}
+	applyDiscoveredComponentStatus(update, discoveredComponentUpdate{CurrentVersion: "1.2.3", UpdateVersion: "1.2.4 build 7"})
+	if update.Status.CurrentVersion != "1.2.3" || update.Status.UpdateVersion != "1.2.4 build 7" || update.Status.ResolvedVersion != "1.2.4 build 7" {
+		t.Fatalf("expected Redfish and repository versions for update job, got %+v", update.Status)
+	}
+
+	failed := &v1.FirmwareUpdateJob{}
+	applyDiscoveredComponentStatus(failed, discoveredComponentUpdate{FailureDetail: "firmware image not found in repository"})
+	if failed.Status.JobState != v1.CampaignStateFailed || failed.Status.ErrorDetail != "firmware image not found in repository" {
+		t.Fatalf("expected failed missing-image job, got %+v", failed.Status)
+	}
+}
+
+func TestSummarizeCampaignJobsOmitsStaleStatusDetails(t *testing.T) {
+	jobs := map[string]*v1.FirmwareUpdateJob{
+		"failed": {
+			Status: v1.FirmwareUpdateJobStatus{JobState: v1.CampaignStateFailed, ErrorDetail: "image missing", Message: "stale message", UpdateVersion: "stale update"},
+		},
+		"updating": {
+			Status: v1.FirmwareUpdateJobStatus{JobState: v1.CampaignStateInProgress, ErrorDetail: "stale error", Message: "stale message"},
+		},
+	}
+
+	_, childJobs := summarizeCampaignJobs(jobs)
+	for _, child := range childJobs {
+		if child.JobState == v1.CampaignStateFailed && (child.Message != "" || child.UpdateVersion != "") {
+			t.Fatalf("expected failed child stale fields to be omitted, got %+v", child)
+		}
+		if child.JobState == v1.CampaignStateInProgress && (child.ErrorDetail != "" || child.Message != "") {
+			t.Fatalf("expected in-progress child details to be omitted, got %+v", child)
+		}
+	}
+}
+
+func TestCampaignChildJobOmitsEmptyStatusDetails(t *testing.T) {
+	encoded, err := json.Marshal(v1.CampaignChildJob{})
+	if err != nil {
+		t.Fatalf("marshal CampaignChildJob: %v", err)
+	}
+	output := string(encoded)
+	for _, unexpected := range []string{`"errorDetail"`, `"message"`, `"updateVersion"`} {
+		if strings.Contains(output, unexpected) {
+			t.Fatalf("expected serialized child job to omit %s, got %s", unexpected, output)
+		}
 	}
 }
 

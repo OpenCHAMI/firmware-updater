@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/user/firmware-updater/pkg/debug"
 	"gopkg.in/yaml.v3"
 
 	"github.com/user/firmware-updater/internal/storage"
@@ -55,6 +56,10 @@ Examples:
 }
 
 func runExport(ctx context.Context, format, output string, kinds []string, perType bool) error {
+	if debug.IsEnabled() {
+		defer debug.Trace("main.runExport", "format", format, "output", output, "kinds", kinds)()
+	}
+
 	fmt.Printf("🚀 Exporting resources...\n")
 	fmt.Printf("   Format: %s\n", format)
 	fmt.Printf("   Output: %s\n", output)
