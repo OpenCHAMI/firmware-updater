@@ -149,6 +149,8 @@ github.com/openchami/fabrica v0.4.7 h1:H63fRqSfiUud/jlPo3NS7tXEtSyXBlgWZ7MDhJuTR
 github.com/openchami/fabrica v0.4.7/go.mod h1:h/0CX1tDwqdmBxk4lm8EtxcMgI6ebaxbz65ic4uozfg=
 github.com/openchami/fabrica v0.4.9 h1:OGKiID0tmA2lGpNTp0u0q5cjOMDaOhXhTO7DCWWp+jA=
 github.com/openchami/fabrica v0.4.9/go.mod h1:C96/BWI20XG81scQWCoKwSvJOP+5DmAjThbojlh1AJo=
+github.com/openchami/fabrica v0.4.10 h1:IQEifXLlqmTYL8sGPeyWU91TJNavl2nW7j0nOG1bxGc=
+github.com/openchami/fabrica v0.4.10/go.mod h1:sYUzamU3d3/wbW4AxKpMKRTAEA/OkEHoc8Tr76NKE8c=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=
@@ -258,6 +260,8 @@ golang.org/x/text v0.36.0 h1:JfKh3XmcRPqZPKevfXVpI1wXPTqbkE5f7JA92a55Yxg=
 golang.org/x/text v0.36.0/go.mod h1:NIdBknypM8iqVmPiuco0Dh6P5Jcdk8lJL0CUebqK164=
 golang.org/x/text v0.38.0 h1:sXmwo9DwP3OK9EZ7PqAdaooSGozfl/3a6/xJcbzPRhE=
 golang.org/x/text v0.38.0/go.mod h1:YXZt3QhHUKYT53r2lLKFIVi6Ao1jdzrTR/KQ09qyxF4=
+golang.org/x/text v0.40.0 h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=
+golang.org/x/text v0.40.0/go.mod h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY=
 golang.org/x/time v0.12.0 h1:ScB/8o8olJvc+CQPWrK3fPZNfh7qgwCrY0zJmoEQLSE=
 golang.org/x/time v0.12.0/go.mod h1:CDIdPxbZBQxdj6cxyCIdrNogrJKMJ7pr37NYpMcMDSg=
 golang.org/x/tools v0.43.0 h1:12BdW9CeB3Z+J/I/wj34VMl8X+fEXBxVR90JeMX5E7s=
