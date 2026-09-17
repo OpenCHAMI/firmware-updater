@@ -41,11 +41,37 @@ builds:
     flags:
       - -trimpath
 
+  - id: secret-cli-linux-amd64
+    main: ./cmd/secret-cli
+    binary: secret-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+
+  - id: secret-cli-linux-arm64
+    main: ./cmd/secret-cli
+    binary: secret-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - arm64
+    flags:
+      - -trimpath
+
 archives:
   - id: firmware-updater
     ids:
       - firmware-updater-server-linux-amd64
       - firmware-updater-server-linux-arm64
+      - secret-cli-linux-amd64
+      - secret-cli-linux-arm64
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -55,6 +81,7 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
     files:
       - README.md
+      - device-profiles/**
 
 checksum:
   name_template: 'checksums.txt'
@@ -76,7 +103,7 @@ changelog:
 
 dockers:
   - id: firmware-updater-amd64
-    ids: [firmware-updater-server-linux-amd64]
+    ids: [firmware-updater-server-linux-amd64, secret-cli-linux-amd64]
     goos: linux
     goarch: amd64
     image_templates:
@@ -86,6 +113,9 @@ dockers:
       - "ghcr.io/openchami/firmware-updater:latest-amd64"
     dockerfile: Dockerfile
     use: buildx
+    extra_files:
+      - docker-entrypoint.sh
+      - device-profiles
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.created={{.Date}}"
@@ -96,7 +126,7 @@ dockers:
       - "--label=org.opencontainers.image.licenses=MIT"
 
   - id: firmware-updater-arm64
-    ids: [firmware-updater-server-linux-arm64]
+    ids: [firmware-updater-server-linux-arm64, secret-cli-linux-arm64]
     goos: linux
     goarch: arm64
     image_templates:
@@ -106,6 +136,9 @@ dockers:
       - "ghcr.io/openchami/firmware-updater:latest-arm64"
     dockerfile: Dockerfile
     use: buildx
+    extra_files:
+      - docker-entrypoint.sh
+      - device-profiles
     build_flag_templates:
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.created={{.Date}}"
