@@ -81,7 +81,8 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
     files:
       - README.md
-      - device-profiles/**
+      - device-profiles/*.yaml
+      - device-profiles/*.yml
 
 checksum:
   name_template: 'checksums.txt'
