@@ -1,0 +1,25 @@
+{
+  "kind": "DeviceProfile",
+  "metadata": {
+    "name": "crayex"
+  },
+  "spec": {
+    "profileID": "crayex",
+    "name": "HPE Cray EX (liquid-cooled)",
+    "enabled": true,
+    "updateActionURI": "/redfish/v1/UpdateService/Actions/SimpleUpdate",
+    "updatePayloadTemplate": "{\n  \"ImageURI\": \"%imageURI%\",\n  \"TransferProtocol\": \"HTTP\",\n  \"Targets\": [\"%target%\"]\n}",
+    "updateMethod": "POST",
+    "manufacturerPath": "/redfish/v1/Chassis/Enclosure",
+    "manufacturerField": "Manufacturer",
+    "modelPath": "/redfish/v1/Chassis/Enclosure",
+    "modelField": "Model",
+    "supportsInventoryExpand": false,
+    "firmwareInventoryExpandParam": "",
+    "verification": {
+      "path": "/redfish/v1/UpdateService/FirmwareInventory/BMC",
+      "field": "SoftwareId",
+      "pattern": "^(nc|cc|sc)"
+    }
+  }
+}

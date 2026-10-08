@@ -6,7 +6,7 @@ name: "HPE iLO 5/6"
 enabled: true
 
 # ----- Update dispatch -----
-updateActionURI: /redfish/v1/UpdateService/Actions/SimpleUpdate
+updateActionURI: /redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate
 updatePayloadTemplate: |
   {
     "ImageURI": "%imageURI%"

@@ -1,0 +1,25 @@
+{
+  "kind": "DeviceProfile",
+  "metadata": {
+    "name": "ilo"
+  },
+  "spec": {
+    "profileID": "ilo",
+    "name": "HPE iLO 5/6",
+    "enabled": true,
+    "updateActionURI": "/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+    "updatePayloadTemplate": "{ \"ImageURI\": \"%imageURI%\" }",
+    "updateMethod": "POST",
+    "manufacturerPath": "/redfish/v1/Chassis/1",
+    "manufacturerField": "Manufacturer",
+    "modelPath": "/redfish/v1/Chassis/1",
+    "modelField": "Model",
+    "supportsInventoryExpand": true,
+    "firmwareInventoryExpandParam": "?$expand=.",
+    "verification": {
+      "path": "/redfish/v1/Managers/1",
+      "field": "Model",
+      "pattern": "^iLO"
+    }
+  }
+}
