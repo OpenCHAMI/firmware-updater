@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Podman equivalent of docker-compose.yml, for hosts that have podman but not
-# docker-compose or podman-compose. Brings up the same two containers
-# (OCI registry + firmware-updater) on a shared network with the same
-# ports/env/volumes as the compose file.
+# Podman equivalent of docker-compose.yml. Uses a bridge network with DNS
+# disabled; the updater reaches the registry by its container IP address.
 #
 # Usage:
 #   tools/podman-compose.sh up
@@ -65,16 +63,23 @@ cmd_up() {
         exit 1
     fi
 
-    podman network exists "$NETWORK_NAME" || podman network create "$NETWORK_NAME"
+    if podman network exists "$NETWORK_NAME"; then
+        dns_enabled="$(podman network inspect --format '{{.DNSEnabled}}' "$NETWORK_NAME")"
+        if [[ "$dns_enabled" == "true" ]]; then
+            echo "error: network ${NETWORK_NAME} has DNS enabled; remove it and rerun to recreate it with --disable-dns" >&2
+            exit 1
+        fi
+    else
+        podman network create --disable-dns "$NETWORK_NAME"
+    fi
+
     podman volume exists "$REGISTRY_VOLUME" || podman volume create "$REGISTRY_VOLUME"
     podman volume exists "$FIRMWARE_VOLUME" || podman volume create "$FIRMWARE_VOLUME"
 
     echo "Starting $REGISTRY_CONTAINER..."
     podman run -d --replace \
         --name "$REGISTRY_CONTAINER" \
-        --hostname registry \
         --network "$NETWORK_NAME" \
-        --network-alias registry \
         --restart unless-stopped \
         -p 5000:5000 \
         -e REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry \
@@ -91,18 +96,22 @@ cmd_up() {
 
     wait_for_registry_health
 
+    registry_ip="$(podman inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$REGISTRY_CONTAINER")"
+    if [[ -z "$registry_ip" || "$registry_ip" == "<no value>" ]]; then
+        echo "error: could not determine the registry container IP address" >&2
+        exit 1
+    fi
+
     echo "Starting $FIRMWARE_CONTAINER..."
     podman run -d --replace \
         --name "$FIRMWARE_CONTAINER" \
-        --hostname firmwareupdater \
         --network "$NETWORK_NAME" \
-        --network-alias firmwareupdater \
         --restart unless-stopped \
-        -p 8080:8080 \
+        -p 8090:8090 \
         -e MASTER_KEY="$MASTER_KEY" \
-        -e FIRMWARE_UPDATER_PORT=8080 \
+        -e FIRMWARE_UPDATER_PORT=8090 \
         -e FIRMWARE_UPDATER_HOST=0.0.0.0 \
-        -e FIRMWARE_UPDATER_REGISTRY_HOST="registry:5000" \
+        -e FIRMWARE_UPDATER_REGISTRY_HOST="${registry_ip}:5000" \
         -e FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true \
         -e FIRMWARE_UPDATER_DEBUG=true \
         -v "${FIRMWARE_VOLUME}:/home/firmware" \
