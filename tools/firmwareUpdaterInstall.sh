@@ -34,6 +34,14 @@ require_command() {
     fi
 }
 
+network_error() {
+    echo "error: Podman could not create or inspect network ${NETWORK_NAME}; see its error above." >&2
+    echo "If Podman reports missing CNI plugins, install containernetworking-plugins (Fedora/RHEL) or containernetworking-plugins (Debian/Ubuntu)." >&2
+    echo "Ensure bridge, portmap, firewall, and tuning are executable in Podman's configured CNI plugin directory (shown in its warning)." >&2
+    echo "If they are installed elsewhere, set cni_plugin_dirs in containers.conf to their actual directory, then rerun $0 up." >&2
+    exit 1
+}
+
 wait_for_registry_health() {
     echo "Waiting for registry to become healthy..."
     for _ in $(seq 1 30); do
@@ -50,6 +58,12 @@ wait_for_registry_health() {
 }
 
 cmd_up() {
+    if [[ ! -f "${CERTS_DIR}/registry.crt" && ! -f "${CERTS_DIR}/registry.key" ]]; then
+        mkdir -p "$CERTS_DIR"
+        openssl req -x509 -newkey rsa:4096 -nodes -sha256 -days 365 \
+            -keyout "${CERTS_DIR}/registry.key" \
+            -out "${CERTS_DIR}/registry.crt"
+    fi
     if [[ ! -f "${CERTS_DIR}/registry.crt" || ! -f "${CERTS_DIR}/registry.key" ]]; then
         echo "error: expected TLS cert/key at ${CERTS_DIR}/registry.crt and ${CERTS_DIR}/registry.key" >&2
         exit 1
@@ -64,13 +78,17 @@ cmd_up() {
     fi
 
     if podman network exists "$NETWORK_NAME"; then
-        dns_enabled="$(podman network inspect --format '{{.DNSEnabled}}' "$NETWORK_NAME")"
+        if ! dns_enabled="$(podman network inspect --format '{{.DNSEnabled}}' "$NETWORK_NAME")"; then
+            network_error
+        fi
         if [[ "$dns_enabled" == "true" ]]; then
             echo "error: network ${NETWORK_NAME} has DNS enabled; remove it and rerun to recreate it with --disable-dns" >&2
             exit 1
         fi
     else
-        podman network create --disable-dns "$NETWORK_NAME"
+        if ! podman network create --disable-dns "$NETWORK_NAME"; then
+            network_error
+        fi
     fi
 
     podman volume exists "$REGISTRY_VOLUME" || podman volume create "$REGISTRY_VOLUME"
@@ -115,7 +133,7 @@ cmd_up() {
         -e FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true \
         -e FIRMWARE_UPDATER_DEBUG=true \
         -v "${FIRMWARE_VOLUME}:/home/firmware" \
-        -v "${SECRETS_FILE}:/home/firmware/secrets.json:ro" \
+        -v "${SECRETS_FILE}:/home/firmware/secrets.json:rw" \
         "$FIRMWARE_IMAGE"
 
     echo "Both containers are running."
