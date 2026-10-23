@@ -19,6 +19,7 @@ import (
 	"github.com/openchami/fabrica/pkg/events"
 	"github.com/openchami/fabrica/pkg/resource"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
+	"github.com/user/firmware-updater/internal/secretsruntime"
 	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/deviceProfiles"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
@@ -68,6 +69,12 @@ var (
 func (r *FirmwareUpdateCampaignReconciler) reconcileFirmwareUpdateCampaign(ctx context.Context, campaign *v1.FirmwareUpdateCampaign) error {
 	if debug.IsEnabled() {
 		defer debug.Trace("FirmwareUpdateCampaignReconciler.reconcileFirmwareUpdateCampaign", "uid", campaign.Metadata.UID, "name", campaign.Metadata.Name)()
+	}
+
+	if campaign.Status.CampaignState == "" || campaign.Status.CampaignState == v1.CampaignStatePending {
+		if err := secretsruntime.ReloadStore(); err != nil {
+			return fmt.Errorf("reload secret store before starting FirmwareUpdateCampaign %s: %w", campaign.GetUID(), err)
+		}
 	}
 
 	if campaign.Status.CampaignState == "" {
@@ -247,7 +254,7 @@ func (r *FirmwareUpdateCampaignReconciler) discoverTargetComponentUpdates(ctx co
 		return cached, nil
 	}
 
-	creds, err := loadBMCCredentials(target.SecretID)
+	creds, _, err := resolveBMCCredentials(target.TargetAddress, target.SecretID, campaign.Spec.Credentials)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials for target %q: %w", target.TargetAddress, err)
 	}
@@ -359,8 +366,11 @@ func campaignToChildJob(campaign *v1.FirmwareUpdateCampaign, target v1.FirmwareC
 		Kind:       "FirmwareUpdateJob",
 		Metadata:   campaign.Metadata,
 		Spec: v1.FirmwareUpdateJobSpec{
-			TargetAddress:      target.TargetAddress,
-			SecretID:           target.SecretID,
+			TargetAddress: target.TargetAddress,
+			SecretID:      target.SecretID,
+			// Child jobs inherit the campaign credentials section so a target
+			// without its own secretID resolves identically to the campaign.
+			Credentials:        campaign.Spec.Credentials,
 			OCIReference:       ociReference,
 			Discovery:          discovery,
 			Targets:            append([]string(nil), targets...),

@@ -36,19 +36,27 @@ type FirmwareUpdateCampaign struct {
 }
 
 // FirmwareUpdateCampaignSpec defines shared update settings and target list.
+//
+// Credentials is optional and applies to every target that does not carry its
+// own SecretID. See pkg/credentials for the full resolution chain.
 type FirmwareUpdateCampaignSpec struct {
 	ServerProxyAddress string                   `json:"serverProxyAddress" validate:"required"`
 	Component          string                   `json:"component,omitempty"`
 	Discovery          *DiscoverySpec           `json:"discovery,omitempty"`
 	OCIReference       *string                  `json:"ociReference,omitempty"`
+	Credentials        *CredentialsSpec         `json:"credentials,omitempty" validate:"omitempty"`
 	DryRun             bool                     `json:"dryrun,omitempty"`
 	Targets            []FirmwareCampaignTarget `json:"targets" validate:"required,dive"`
 }
 
 // FirmwareCampaignTarget identifies a single hardware target in a campaign.
+//
+// SecretID is optional; when empty the credential is resolved from the campaign
+// Credentials section, from a secret stored under TargetAddress, or from the
+// server-wide default.
 type FirmwareCampaignTarget struct {
 	TargetAddress string `json:"targetAddress" validate:"required"`
-	SecretID      string `json:"secretID" validate:"required"`
+	SecretID      string `json:"secretID,omitempty"`
 }
 
 // FirmwareUpdateCampaignStatus tracks aggregate and per-target state.
@@ -120,13 +128,14 @@ func (r *FirmwareUpdateCampaign) Validate(ctx context.Context) error {
 		return fmt.Errorf("spec.targets must include at least one target")
 	}
 
+	if err := r.Spec.Credentials.Validate("spec.credentials"); err != nil {
+		return err
+	}
+
 	seen := make(map[string]struct{}, len(r.Spec.Targets))
 	for i, target := range r.Spec.Targets {
 		if strings.TrimSpace(target.TargetAddress) == "" {
 			return fmt.Errorf("spec.targets[%d].targetAddress must be provided", i)
-		}
-		if strings.TrimSpace(target.SecretID) == "" {
-			return fmt.Errorf("spec.targets[%d].secretID must be provided", i)
 		}
 
 		key := strings.TrimSpace(target.TargetAddress)

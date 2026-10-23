@@ -38,6 +38,16 @@ To implement this specification, the following discrete changes must be made to 
 * Parse the JSON string back into discrete `username` and `password` variables.
 * Inject these variables into the `curl` subprocess arguments (e.g., `-u`, `username:password`).
 
+---
+
+> **Superseded in part.** The requirement that every job and campaign target
+> carry an explicit `spec.secretID` no longer holds. Secret *storage* and
+> *encryption* are unchanged, but secret *selection* now goes through the
+> resolution chain described in [UPDATE_CREDENTIALS.md](UPDATE_CREDENTIALS.md)
+> and implemented in `pkg/credentials`. See
+> [HANDOFF-update_credentials.md](HANDOFF-update_credentials.md) for the
+> as-built behaviour.
+
 **README updates**
 * Ensure the README is up to date with the new changes.
 

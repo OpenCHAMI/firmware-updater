@@ -23,36 +23,70 @@ func TestReconcileFirmwareUpdateJobCompletesFromRedfishTask(t *testing.T) {
 	configureFastPollingForTests(t)
 	ensureTestSecretStore(t)
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assertBasicAuth(t, r)
-		if r.URL.Path != "/redfish/v1/TaskService/Tasks/mock-task" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
-		}
-		respondTestJSON(t, w, map[string]interface{}{
-			"TaskState":  "Completed",
-			"TaskStatus": "OK",
+	for _, scenario := range []struct {
+		name     string
+		versions []string
+		expected string
+		state    string
+		detail   string
+	}{
+		{name: "expected version", versions: []string{"1.2.0"}, expected: "1.2.0", state: "Completed"},
+		{name: "wait for change after completed task", versions: []string{"1.0.0", "1.0.0", "1.2.0"}, expected: "1.2.0", state: "Completed"},
+		{name: "unexpected change", versions: []string{"1.1.0"}, expected: "1.2.0", state: "Failed", detail: "unexpected version"},
+		{name: "unexpected build", versions: []string{"1.2.0 build 8"}, expected: "1.2.0 build 7", state: "Failed", detail: "unexpected version"},
+		{name: "unchanged timeout", versions: []string{"1.0.0"}, expected: "1.2.0", state: "Failed", detail: "timed out"},
+		{name: "already expected but unchanged", versions: []string{"1.0.0"}, expected: "1.0.0", state: "Failed", detail: "timed out"},
+		{name: "missing version timeout", versions: []string{""}, expected: "1.2.0", state: "Failed", detail: "timed out"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var inventoryReads int
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assertBasicAuth(t, r)
+				switch r.URL.Path {
+				case "/redfish/v1/UpdateService/FirmwareInventory/BMC":
+					version := scenario.versions[inventoryReads]
+					if inventoryReads < len(scenario.versions)-1 {
+						inventoryReads++
+					}
+					respondTestJSON(t, w, map[string]interface{}{"Version": version})
+					return
+				case "/redfish/v1/TaskService/Tasks/mock-task":
+				default:
+					t.Fatalf("unexpected path %q", r.URL.Path)
+				}
+				respondTestJSON(t, w, map[string]interface{}{
+					"TaskState":  "Completed",
+					"TaskStatus": "OK",
+				})
+			}))
+			defer server.Close()
+
+			job := v1.FirmwareUpdateJob{
+				Spec: v1.FirmwareUpdateJobSpec{
+					TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+					SecretID:      "test-secret",
+					Targets:       []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"},
+				},
+				Status: v1.FirmwareUpdateJobStatus{
+					JobState:       "InProgress",
+					TaskID:         "/redfish/v1/TaskService/Tasks/mock-task",
+					CurrentVersion: "1.0.0",
+					UpdateVersion:  scenario.expected,
+				},
+			}
+
+			reconciler := &FirmwareUpdateJobReconciler{}
+			if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
+				t.Fatalf("reconcileFirmwareUpdateJob returned error: %v", err)
+			}
+
+			if job.Status.JobState != scenario.state {
+				t.Fatalf("expected %s, got %+v", scenario.state, job.Status)
+			}
+			if !strings.Contains(job.Status.ErrorDetail, scenario.detail) {
+				t.Fatalf("expected detail %q, got %q", scenario.detail, job.Status.ErrorDetail)
+			}
 		})
-	}))
-	defer server.Close()
-
-	job := v1.FirmwareUpdateJob{
-		Spec: v1.FirmwareUpdateJobSpec{
-			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
-			SecretID:      "test-secret",
-		},
-		Status: v1.FirmwareUpdateJobStatus{
-			JobState: "InProgress",
-			TaskID:   "/redfish/v1/TaskService/Tasks/mock-task",
-		},
-	}
-
-	reconciler := &FirmwareUpdateJobReconciler{}
-	if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
-		t.Fatalf("reconcileFirmwareUpdateJob returned error: %v", err)
-	}
-
-	if job.Status.JobState != "Completed" {
-		t.Fatalf("expected Completed, got %q", job.Status.JobState)
 	}
 }
 
@@ -122,6 +156,7 @@ func TestReconcileFirmwareUpdateJobFallsBackToInventoryWhenTaskMissing(t *testin
 			JobState:        "InProgress",
 			TaskID:          "/redfish/v1/TaskService/Tasks/mock-task",
 			ResolvedVersion: "1.10.2",
+			CurrentVersion:  "1.10.1",
 		},
 	}
 
@@ -166,6 +201,7 @@ func TestReconcileFirmwareUpdateJobIgnoresInventoryWarning(t *testing.T) {
 		Status: v1.FirmwareUpdateJobStatus{
 			JobState:        "InProgress",
 			ResolvedVersion: "1.10.3",
+			CurrentVersion:  "1.10.2",
 		},
 	}
 
@@ -385,6 +421,164 @@ func TestVersionsSemanticallyEqualTwoComponentVersions(t *testing.T) {
 	}
 }
 
+func TestFirmwareUpdateJobRejectsMultipleEndpoints(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redfish/v1/UpdateService/FirmwareInventory":
+			respondTestJSON(t, w, map[string]interface{}{
+				"Members": []map[string]string{{"@odata.id": "/A"}, {"@odata.id": "/B"}},
+			})
+		default:
+			respondTestJSON(t, w, map[string]interface{}{"Name": "BMC", "Version": "1.0.0"})
+		}
+	}))
+	defer server.Close()
+	job := &v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			Targets:       []string{"/A", "/B"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{UpdateVersion: "1.2.0"},
+	}
+	if err := captureFirmwareVersions(context.Background(), job, bmcCredentials{}); err == nil || !strings.Contains(err.Error(), "exactly one firmware endpoint") {
+		t.Fatalf("expected capture to reject multiple endpoints, got %v", err)
+	}
+	for _, discover := range []bool{false, true} {
+		if discover {
+			job.Spec.Targets = nil
+			job.Spec.Component = "BMC"
+		}
+		verification, err := verifyFirmwareTargetsUpdatedOnce(context.Background(), job, bmcCredentials{})
+		if err != nil || !verification.Failed || !strings.Contains(verification.Detail, "exactly one firmware endpoint") {
+			t.Fatalf("expected verification to reject multiple endpoints (discover=%t), got %+v, err %v", discover, verification, err)
+		}
+	}
+}
+
+func TestCaptureFirmwareVersionsAndVerifyAfterStorageRoundTrip(t *testing.T) {
+	configureFastPollingForTests(t)
+	installed := "1.0.0"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respondTestJSON(t, w, map[string]interface{}{"Version": installed})
+	}))
+	defer server.Close()
+
+	deadline := time.Now().Add(time.Minute)
+	job := v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			Targets:       []string{"/A"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			UpdateVersion: "1.2.0",
+			Timeout:       &deadline,
+		},
+	}
+	if err := captureFirmwareVersions(context.Background(), &job, bmcCredentials{}); err != nil {
+		t.Fatal(err)
+	}
+	if job.Status.CurrentVersion != "1.0.0" {
+		t.Fatalf("expected current version baseline, got %+v", job.Status)
+	}
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored v1.FirmwareUpdateJob
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status.CurrentVersion != "1.0.0" || strings.Contains(string(raw), "initialVersions") {
+		t.Fatalf("expected only currentVersion baseline in storage, got %s", raw)
+	}
+	if restored.Status.Timeout == nil || !restored.Status.Timeout.Equal(deadline) {
+		t.Fatal("verification deadline did not survive storage")
+	}
+	for _, scenario := range []struct {
+		name    string
+		version string
+		updated bool
+		failed  bool
+	}{
+		{name: "unchanged", version: "1.0.0"},
+		{name: "unexpected change", version: "1.1.0", failed: true},
+		{name: "updated", version: "1.2.0", updated: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			installed = scenario.version
+			verification, err := verifyFirmwareTargetsUpdatedOnce(context.Background(), &restored, bmcCredentials{})
+			if err != nil || verification.Updated != scenario.updated || verification.Failed != scenario.failed {
+				t.Fatalf("unexpected verification %+v, err %v", verification, err)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, &restored, bmcCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected parent cancellation, got %v", err)
+	}
+	if !restored.Status.Timeout.Equal(deadline) {
+		t.Fatal("verification restarted its timeout")
+	}
+	expired := time.Now().Add(-time.Second)
+	restored.Status.Timeout = &expired
+	verification, err := verifyFirmwareTargetsUpdatedWithBackoff(context.Background(), &restored, bmcCredentials{})
+	if err != nil || !verification.Failed || !strings.Contains(verification.Detail, "timed out") {
+		t.Fatalf("expected expired verification to fail, got %+v, err %v", verification, err)
+	}
+}
+
+func TestReconcileFirmwareUpdateJobFailsWhenInventoryUnavailableUntilTimeout(t *testing.T) {
+	configureFastPollingForTests(t)
+	ensureTestSecretStore(t)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	job := v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			SecretID:      "test-secret",
+			Targets:       []string{"/A"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			JobState: "InProgress", CurrentVersion: "1.0.0", UpdateVersion: "1.2.0",
+		},
+	}
+	reconciler := &FirmwareUpdateJobReconciler{}
+	if err := reconciler.reconcileFirmwareUpdateJob(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Status.JobState != "Failed" || !strings.Contains(job.Status.ErrorDetail, "timed out") {
+		t.Fatalf("expected terminal timeout failure, got %+v", job.Status)
+	}
+}
+
+func TestVerifyFirmwareTargetsUpdatedRejectsUnexpectedVersionChange(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respondTestJSON(t, w, map[string]interface{}{"Version": "1.1.0"})
+	}))
+	defer server.Close()
+
+	job := &v1.FirmwareUpdateJob{
+		Spec: v1.FirmwareUpdateJobSpec{
+			TargetAddress: strings.TrimPrefix(server.URL, "https://"),
+			Targets:       []string{"/redfish/v1/UpdateService/FirmwareInventory/BMC"},
+		},
+		Status: v1.FirmwareUpdateJobStatus{
+			CurrentVersion:  "1.0.0",
+			ResolvedVersion: "1.2.0",
+		},
+	}
+	verification, err := verifyFirmwareTargetsUpdatedOnce(context.Background(), job, bmcCredentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verification.Failed || !strings.Contains(verification.Detail, "1.1.0") || !strings.Contains(verification.Detail, "1.2.0") {
+		t.Fatalf("expected unexpected version failure with actual and expected versions, got %+v", verification)
+	}
+}
+
 func TestVerifyFirmwareTargetsUpdatedWithBackoffRespectsParentContextTimeout(t *testing.T) {
 	ensureTestSecretStore(t)
 	configureFastPollingForTests(t)
@@ -411,6 +605,7 @@ func TestVerifyFirmwareTargetsUpdatedWithBackoffRespectsParentContextTimeout(t *
 		},
 		Status: v1.FirmwareUpdateJobStatus{
 			ResolvedVersion: "1.2.0",
+			CurrentVersion:  "1.0.0",
 		},
 	}
 
@@ -511,7 +706,11 @@ func ensureTestSecretStore(t *testing.T) {
 	installTestSecretStore.Do(func() {
 		if err := secretsruntime.SetStore(fakeSecretStore{
 			secrets: map[string]string{
-				"test-secret": `{"username":"root","password":"initial0"}`,
+				"test-secret":    `{"username":"root","password":"initial0"}`,
+				"binding-secret": `{"username":"root","password":"initial0"}`,
+				"10.0.0.77":      `{"username":"root","password":"initial0"}`,
+				"fleet-default":  `{"username":"root","password":"initial0"}`,
+				"blank-secret":   `{"username":"","password":""}`,
 			},
 		}); err != nil {
 			t.Fatalf("SetStore failed: %v", err)
@@ -519,8 +718,48 @@ func ensureTestSecretStore(t *testing.T) {
 	})
 }
 
+func TestFirmwareUpdateTimeoutFromEnvironment(t *testing.T) {
+	for _, scenario := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "empty uses default", want: 30 * time.Minute},
+		{name: "configured seconds", value: "120", want: 2 * time.Minute},
+		{name: "trim whitespace", value: " 60 ", want: time.Minute},
+		{name: "invalid uses default", value: "invalid", want: 30 * time.Minute},
+		{name: "zero uses default", value: "0", want: 30 * time.Minute},
+		{name: "negative uses default", value: "-1", want: 30 * time.Minute},
+		{name: "overflow uses default", value: "9223372036854775807", want: 30 * time.Minute},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Setenv(firmwareUpdateTimeoutEnvVar, scenario.value)
+			if got := getFirmwareUpdateTimeout(); got != scenario.want {
+				t.Fatalf("expected timeout %s, got %s", scenario.want, got)
+			}
+			before := time.Now()
+			job := &v1.FirmwareUpdateJob{}
+			if _, err := verifyFirmwareTargetsUpdatedWithBackoff(context.Background(), job, bmcCredentials{}); err != nil {
+				t.Fatal(err)
+			}
+			if job.Status.Timeout == nil || job.Status.Timeout.Before(before.Add(scenario.want)) || job.Status.Timeout.After(time.Now().Add(scenario.want)) {
+				t.Fatalf("expected saved expiration using %s, got %v", scenario.want, job.Status.Timeout)
+			}
+			original := *job.Status.Timeout
+			t.Setenv(firmwareUpdateTimeoutEnvVar, "300")
+			if _, err := verifyFirmwareTargetsUpdatedWithBackoff(context.Background(), job, bmcCredentials{}); err != nil {
+				t.Fatal(err)
+			}
+			if !job.Status.Timeout.Equal(original) {
+				t.Fatal("existing timeout changed when environment changed")
+			}
+		})
+	}
+}
+
 func configureFastPollingForTests(t *testing.T) {
 	t.Helper()
+	t.Setenv(firmwareUpdateTimeoutEnvVar, "")
 
 	originalMaxDuration := redfishLongPollMaxDuration
 	originalMinInterval := redfishLongPollMinInterval

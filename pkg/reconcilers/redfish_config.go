@@ -11,6 +11,7 @@ import (
 )
 
 const redfishHTTPTimeoutEnvVar = "FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT"
+const firmwareUpdateTimeoutEnvVar = "FIRMWARE_UPDATER_TIMEOUT"
 
 var configuredRedfishHTTPTimeoutNanos atomic.Int64
 
@@ -37,6 +38,14 @@ func getRedfishHTTPTimeout() time.Duration {
 		return redfish.DefaultHTTPTimeout
 	}
 	return timeout
+}
+
+func getFirmwareUpdateTimeout() time.Duration {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(firmwareUpdateTimeoutEnvVar)), 10, 64)
+	if err != nil || seconds <= 0 || seconds > int64(time.Duration(1<<63-1)/time.Second) {
+		return redfishLongPollMaxDuration
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func newRedfishClient(targetAddress, username, password string) *redfish.Client {

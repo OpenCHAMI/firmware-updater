@@ -177,7 +177,11 @@ func ResolvePayload(ctx context.Context, ociReference string) (DiscoveryResult, 
 	payloadFilename := strings.TrimSpace(payloadLayer.Annotations[annotationImageTitle])
 	payloadIndex.Store(payloadDigest, payloadLocation{Repository: parsed.Registry + "/" + parsed.Repository})
 
-	return DiscoveryResult{Digest: payloadDigest, OCIReference: ociReference, PayloadFilename: payloadFilename}, nil
+	return DiscoveryResult{
+		Digest: payloadDigest, OCIReference: ociReference, PayloadFilename: payloadFilename,
+		Version:       strings.TrimSpace(manifest.Annotations[annotationImageVersion]),
+		VersionString: strings.TrimSpace(manifest.Annotations[annotationFirmwareVersionString]),
+	}, nil
 }
 
 func ResolvePayloadFromDiscovery(ctx context.Context, repository, hardwareModel, versionTarget string) (DiscoveryResult, error) {

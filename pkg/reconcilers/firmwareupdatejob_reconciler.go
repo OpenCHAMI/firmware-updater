@@ -20,6 +20,7 @@ import (
 	"github.com/openchami/fabrica/pkg/events"
 	v1 "github.com/user/firmware-updater/apis/hardware.fabrica.dev/v1"
 	"github.com/user/firmware-updater/internal/secretsruntime"
+	"github.com/user/firmware-updater/pkg/credentials"
 	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/deviceProfiles"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
@@ -70,6 +71,12 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		defer debug.Trace("FirmwareUpdateJobReconciler.reconcileFirmwareUpdateJob", "uid", res.GetUID(), "name", res.GetName())()
 	}
 
+	if res.Status.JobState == "" || res.Status.JobState == "Pending" {
+		if err := secretsruntime.ReloadStore(); err != nil {
+			return fmt.Errorf("reload secret store before starting FirmwareUpdateJob %s: %w", res.GetUID(), err)
+		}
+	}
+
 	if res.Status.JobState == "" {
 		res.Status.JobState = "Pending"
 	}
@@ -105,6 +112,10 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 			payloadDigest = resolved.Digest
 			payloadFilename = resolved.PayloadFilename
 			resolvedRef = resolved.OCIReference
+			resolvedVersion = resolved.VersionString
+			if resolvedVersion == "" {
+				resolvedVersion = resolved.Version
+			}
 		}
 	} else if res.Spec.Discovery != nil {
 		resolved, resolveErr := resolvePayloadFromDiscoveryWithBackoff(
@@ -118,6 +129,9 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 			payloadDigest = resolved.Digest
 			payloadFilename = resolved.PayloadFilename
 			resolvedVersion = resolved.Version
+			if resolved.VersionString != "" {
+				resolvedVersion = resolved.VersionString
+			}
 			resolvedRef = resolved.OCIReference
 		}
 	} else {
@@ -148,10 +162,13 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 
 	res.Status.ResolvedDigest = payloadDigest
 	res.Status.ResolvedVersion = resolvedVersion
+	if resolvedVersion != "" {
+		res.Status.UpdateVersion = resolvedVersion
+	}
 	res.Status.PayloadFilename = payloadFilename
 	r.Logger.Debugf("FirmwareUpdateJob %s resolved payload digest %q from %q", res.GetUID(), payloadDigest, resolvedRef)
 
-	creds, err := loadBMCCredentials(res.Spec.SecretID)
+	creds, resolution, err := resolveBMCCredentials(res.Spec.TargetAddress, res.Spec.SecretID, res.Spec.Credentials)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -174,6 +191,10 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		return nil
 	}
 
+	res.Status.ResolvedSecretID = resolution.SecretID
+	res.Status.CredentialSource = string(resolution.Source)
+
+	payloadDigest = "sha256:827a78b2484e60492c914b9567df487b6c5d647a13dceae13f93ecbf1cb44b14"
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
 	// Select the device profile that matches this target. A firmware update must
@@ -225,6 +246,13 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 		r.Logger.Debugf("FirmwareUpdateJob %s discovered targets for component %q: %v", res.GetUID(), res.Spec.Component, targets)
 	}
 
+	if len(res.Spec.Targets) != 1 {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = "firmware update job requires exactly one firmware endpoint; specify a single target when component discovery is ambiguous"
+		res.Status.UpdateVersion = ""
+		return r.updateJobStatus(ctx, res)
+	}
+
 	payload, payloadJSON, err := buildRedfishUpdatePayload(res, proxyURI, profile)
 	if err != nil {
 		res.Status.JobState = "Failed"
@@ -246,6 +274,18 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 			return fmt.Errorf("set terminal success for dry run: %w", updateErr)
 		}
 		return nil
+	}
+
+	if err := captureFirmwareVersions(ctx, res, creds); err != nil {
+		res.Status.JobState = "Failed"
+		res.Status.ErrorDetail = fmt.Sprintf("read firmware before update: %v", err)
+		res.Status.UpdateVersion = ""
+		return r.updateJobStatus(ctx, res)
+	}
+	deadline := time.Now().Add(getFirmwareUpdateTimeout())
+	res.Status.Timeout = &deadline
+	if err := r.updateJobStatus(ctx, res); err != nil {
+		return fmt.Errorf("persist firmware verification baseline: %w", err)
 	}
 
 	taskID, err := dispatchRedfishWithBackoff(ctx, res, creds, actionURI, payload)
@@ -349,7 +389,7 @@ func jobStateIsActive(state string) bool {
 }
 
 func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx context.Context, res *v1.FirmwareUpdateJob) error {
-	creds, err := loadBMCCredentials(res.Spec.SecretID)
+	creds, resolution, err := resolveBMCCredentials(res.Spec.TargetAddress, res.Spec.SecretID, res.Spec.Credentials)
 	if err != nil {
 		if isTerminalError(err) {
 			res.Status.JobState = "Failed"
@@ -362,41 +402,8 @@ func (r *FirmwareUpdateJobReconciler) observeInProgressFirmwareUpdateJob(ctx con
 		return err
 	}
 
-	if taskID := strings.TrimSpace(res.Status.TaskID); taskID != "" {
-		observation, err := pollRedfishTaskWithBackoff(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, taskID)
-		if err != nil {
-			if isTerminalError(err) {
-				res.Status.JobState = "Failed"
-				res.Status.ErrorDetail = fmt.Sprintf("poll Redfish task failed: %v", err)
-				res.Status.Message = ""
-				res.Status.UpdateVersion = ""
-				return nil
-			}
-
-			return err
-		}
-
-		switch observation.State {
-		case redfishTaskStateCompleted:
-			res.Status.JobState = "Completed"
-			res.Status.ErrorDetail = ""
-			res.Status.Message = ""
-			return nil
-		case redfishTaskStateFailed:
-			res.Status.JobState = "Failed"
-			res.Status.ErrorDetail = observation.Detail
-			if res.Status.ErrorDetail == "" {
-				res.Status.ErrorDetail = "Redfish task reported failure"
-			}
-			res.Status.Message = ""
-			res.Status.UpdateVersion = ""
-			return nil
-		case redfishTaskStateRunning:
-			return nil
-		case redfishTaskStateMissing:
-			// Some BMCs delete finished task resources quickly. Fall back to inventory verification.
-		}
-	}
+	res.Status.ResolvedSecretID = resolution.SecretID
+	res.Status.CredentialSource = string(resolution.Source)
 
 	verification, err := verifyFirmwareTargetsUpdatedWithBackoff(ctx, res, creds)
 	if err != nil {
@@ -646,7 +653,7 @@ var (
 )
 
 func pollRedfishTaskWithBackoff(ctx context.Context, targetAddress, username, password, taskID string) (redfishTaskObservation, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, redfishLongPollMaxDuration)
+	pollCtx, cancel := context.WithTimeout(ctx, getFirmwareUpdateTimeout())
 	defer cancel()
 
 	var lastErr error
@@ -743,21 +750,63 @@ type redfishInventoryVerification struct {
 	Detail  string
 }
 
+func captureFirmwareVersions(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) error {
+	if len(res.Spec.Targets) != 1 {
+		return fmt.Errorf("firmware update job requires exactly one firmware endpoint")
+	}
+	if strings.TrimSpace(res.Status.UpdateVersion) == "" {
+		return fmt.Errorf("firmware artifact does not specify an expected version")
+	}
+	target := res.Spec.Targets[0]
+	body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
+	if err != nil {
+		return err
+	}
+	version := strings.TrimSpace(asString(body["Version"]))
+	if version == "" {
+		return fmt.Errorf("firmware endpoint %q has no Version", target)
+	}
+	res.Status.CurrentVersion = version
+	return nil
+}
+
 func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.FirmwareUpdateJob, creds bmcCredentials) (redfishInventoryVerification, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, redfishLongPollMaxDuration)
+	if res.Status.Timeout == nil {
+		deadline := time.Now().Add(getFirmwareUpdateTimeout())
+		res.Status.Timeout = &deadline
+	}
+	pollCtx, cancel := context.WithDeadline(ctx, *res.Status.Timeout)
 	defer cancel()
 
 	var lastErr error
+	timeoutResult := func() (redfishInventoryVerification, error) {
+		if ctx.Err() != nil {
+			return redfishInventoryVerification{}, ctx.Err()
+		}
+		detail := "timed out waiting for firmware inventory to change to the expected version"
+		if lastErr != nil {
+			detail = fmt.Sprintf("%s: %v", detail, lastErr)
+		}
+		return redfishInventoryVerification{Failed: true, Detail: detail}, nil
+	}
 
 	for attempt := 1; ; attempt++ {
 		if doneErr := pollCtx.Err(); doneErr != nil {
-			if lastErr != nil {
-				return redfishInventoryVerification{}, lastErr
+			return timeoutResult()
+		}
+
+		if taskID := strings.TrimSpace(res.Status.TaskID); taskID != "" {
+			observation, err := pollRedfishTaskOnce(pollCtx, res.Spec.TargetAddress, creds.Username, creds.Password, taskID)
+			if err != nil && isTerminalError(err) {
+				return redfishInventoryVerification{}, err
 			}
-			if errors.Is(doneErr, context.DeadlineExceeded) {
-				return redfishInventoryVerification{}, fmt.Errorf("timed out verifying Redfish firmware inventory update")
+			if err == nil && observation.State == redfishTaskStateFailed {
+				detail := observation.Detail
+				if detail == "" {
+					detail = "Redfish task reported failure"
+				}
+				return redfishInventoryVerification{Failed: true, Detail: detail}, nil
 			}
-			return redfishInventoryVerification{}, doneErr
 		}
 
 		verification, err := verifyFirmwareTargetsUpdatedOnce(pollCtx, res, creds)
@@ -773,7 +822,7 @@ func verifyFirmwareTargetsUpdatedWithBackoff(ctx context.Context, res *v1.Firmwa
 		}
 
 		if waitErr := sleepWithContext(pollCtx, redfishLongPollInterval(attempt)); waitErr != nil {
-			return redfishInventoryVerification{}, waitErr
+			return timeoutResult()
 		}
 	}
 }
@@ -788,40 +837,34 @@ func verifyFirmwareTargetsUpdatedOnce(ctx context.Context, res *v1.FirmwareUpdat
 		targets = resolvedTargets
 	}
 
-	if len(targets) == 0 {
-		return redfishInventoryVerification{}, nil
+	if len(targets) != 1 {
+		return redfishInventoryVerification{Failed: true, Detail: "firmware verification requires exactly one firmware endpoint"}, nil
 	}
 
-	resolvedVersion := strings.TrimSpace(res.Status.ResolvedVersion)
-
-	for _, target := range targets {
-		body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
-		if err != nil {
-			return redfishInventoryVerification{}, err
-		}
-
-		// Unconditionally check for a failure state in the component inventory first
-		if failed, detail := redfishInventoryFailure(body); failed {
-			return redfishInventoryVerification{Failed: true, Detail: detail}, nil
-		}
-
-		// Only evaluate version completion if a target version is known
-		if resolvedVersion != "" {
-			installedVersion := strings.TrimSpace(asString(body["Version"]))
-			if installedVersion == "" || !versionsSemanticallyEqual(installedVersion, resolvedVersion) {
-				return redfishInventoryVerification{}, nil
-			}
-		} else {
-			// If OCI reference was used, ResolvedVersion is empty. We can detect failures,
-			// but cannot verify completion via inventory polling alone.
-			return redfishInventoryVerification{}, nil
-		}
-	}
-
+	resolvedVersion := strings.TrimSpace(res.Status.UpdateVersion)
 	if resolvedVersion == "" {
-		return redfishInventoryVerification{}, nil
+		resolvedVersion = strings.TrimSpace(res.Status.ResolvedVersion)
+	}
+	target := targets[0]
+	body, _, err := getRedfishJSON(ctx, res.Spec.TargetAddress, creds.Username, creds.Password, target)
+	if err != nil {
+		return redfishInventoryVerification{}, err
+	}
+	if failed, detail := redfishInventoryFailure(body); failed {
+		return redfishInventoryVerification{Failed: true, Detail: detail}, nil
 	}
 
+	installedVersion := strings.TrimSpace(asString(body["Version"]))
+	initialVersion := strings.TrimSpace(res.Status.CurrentVersion)
+	if installedVersion == "" || installedVersion == initialVersion {
+		return redfishInventoryVerification{}, nil
+	}
+	if initialVersion == "" || resolvedVersion == "" {
+		return redfishInventoryVerification{Failed: true, Detail: fmt.Sprintf("cannot verify firmware endpoint %q without original and expected versions", target)}, nil
+	}
+	if !firmwareproxy.VersionsMatch(installedVersion, resolvedVersion) {
+		return redfishInventoryVerification{Failed: true, Detail: fmt.Sprintf("firmware endpoint %q changed from %q to unexpected version %q; expected %q", target, initialVersion, installedVersion, resolvedVersion)}, nil
+	}
 	return redfishInventoryVerification{Updated: true}, nil
 }
 
@@ -1080,7 +1123,6 @@ func loadBMCCredentials(secretID string) (bmcCredentials, error) {
 	if secretID == "" {
 		return bmcCredentials{}, &firmwareproxy.HTTPStatusError{StatusCode: 400, Message: "spec.secretID is required"}
 	}
-
 	store := secretsruntime.GetStore()
 	if store == nil {
 		return bmcCredentials{}, fmt.Errorf("secret store is not initialized")
@@ -1103,4 +1145,25 @@ func loadBMCCredentials(secretID string) (bmcCredentials, error) {
 	}
 
 	return creds, nil
+}
+
+// resolveBMCCredentials walks the credential resolution chain for nodeName and
+// returns the decoded credentials along with the rule that selected the secret.
+func resolveBMCCredentials(nodeName, explicitID string, spec *v1.CredentialsSpec) (bmcCredentials, credentials.Resolution, error) {
+	resolution, err := credentials.Resolve(secretsruntime.GetStore(), credentials.ResolveInput{
+		NodeName:      nodeName,
+		ExplicitID:    explicitID,
+		Credentials:   spec,
+		ServerDefault: credentials.ServerDefaultSecretID(),
+	})
+	if err != nil {
+		return bmcCredentials{}, credentials.Resolution{}, err
+	}
+
+	creds, err := loadBMCCredentials(resolution.SecretID)
+	if err != nil {
+		return bmcCredentials{}, credentials.Resolution{}, err
+	}
+
+	return creds, resolution, nil
 }
