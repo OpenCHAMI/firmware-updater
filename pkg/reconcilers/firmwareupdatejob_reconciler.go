@@ -194,7 +194,6 @@ func (r *FirmwareUpdateJobReconciler) reconcileFirmwareUpdateJob(ctx context.Con
 	res.Status.ResolvedSecretID = resolution.SecretID
 	res.Status.CredentialSource = string(resolution.Source)
 
-	payloadDigest = "sha256:827a78b2484e60492c914b9567df487b6c5d647a13dceae13f93ecbf1cb44b14"
 	proxyURI := fmt.Sprintf("http://%s/firmware-proxy/layer/%s", net.JoinHostPort(res.Spec.ServerProxyAddress, "8090"), payloadDigest)
 
 	// Select the device profile that matches this target. A firmware update must
