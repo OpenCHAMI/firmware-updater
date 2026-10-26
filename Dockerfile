@@ -29,7 +29,7 @@ ENV FIRMWARE_UPDATER_HOST=0.0.0.0 \
 	FIRMWARE_UPDATER_SECRETS_FILE=/home/firmware/secrets.json \
 	FIRMWARE_UPDATER_DEVICE_PROFILES_DIR=/home/firmware/device-profiles \
 	FIRMWARE_UPDATER_DEBUG=false \
-	FIRMWARE_UPDATER_TIMEOUT=300 \
+	FIRMWARE_UPDATER_TIMEOUT=600 \
 	FIRMWARE_UPDATER_DEFAULT_SECRET_ID=default-bmc 
 
 # MASTER_KEY unlocks the encrypted secrets store. Dockerfile ENV does NOT run

@@ -133,7 +133,7 @@ cmd_up() {
         -e FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true \
         -e FIRMWARE_UPDATER_DEBUG=true \
         -v "${FIRMWARE_VOLUME}:/home/firmware" \
-        -v "${SECRETS_FILE}:/home/firmware/secrets.json:rw" \
+        -v "${SECRETS_FILE}:/home/firmware/secrets.json:rw,U" \
         "$FIRMWARE_IMAGE"
 
     echo "Both containers are running."
