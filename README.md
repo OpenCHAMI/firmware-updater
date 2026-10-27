@@ -41,7 +41,7 @@ Alternative (published container image with Podman):
 podman run --replace \
   --network host \
   --name firmware-updater \
-  -v "$(pwd)/secrets.json:/secrets.json:ro" \
+  -v "$(pwd)/secrets.json:/secrets.json:rw" \
   -e MASTER_KEY="${MASTER_KEY}" \
   -e FIRMWARE_UPDATER_REDFISH_HTTP_TIMEOUT=20 \
   ghcr.io/openchami/firmware-updater:v0.6.2 \
@@ -190,7 +190,8 @@ For Docker Compose, use `registry:5000/firmware` from inside the updater network
 
 Validation rules enforced by API type validation:
 - `spec.serverProxyAddress` is required.
-- `spec.targets[]` is required; each entry must include `targetAddress` and `secretID`.
+- `spec.targets[]` is required; each entry must include `targetAddress`. `secretID` is optional (see [How Credentials Work](#4-how-credentials-work)).
+- `spec.credentials` is optional; each binding must have a non-empty `secretID` and at least one valid node pattern.
 - `spec.ociReference` and `spec.discovery` are mutually exclusive.
 - At least one of `spec.ociReference` or `spec.discovery` must be present.
 - If campaign uses `spec.ociReference`, `spec.component` must be set.
@@ -304,7 +305,87 @@ curl -sk -u <user>:<pass> https://<bmc>/redfish/v1/UpdateService/FirmwareInvento
 
 ## 4. How Credentials Work
 
-Credentials are resolved from encrypted secret store entries by `spec.secretID`.
+Credentials are stored in the encrypted secret store and selected per node by an
+ordered resolution chain. The first rule that produces a secret ID wins:
+
+| # | Rule | Source value in `status.credentialSource` | Input |
+| --- | --- | --- | --- |
+| 1 | Explicit | `explicit` | `spec.secretID` (job) or `spec.targets[].secretID` (campaign) |
+| 2 | Binding | `binding` | a matching entry in `spec.credentials.bindings` |
+| 3 | Node name | `node-name` | a secret stored under the node's `targetAddress` |
+| 4 | Spec default | `spec-default` | `spec.credentials.default` |
+| 5 | Server default | `server-default` | `--default-secret-id` / `FIRMWARE_UPDATER_DEFAULT_SECRET_ID` |
+
+If no rule produces a secret the job fails immediately with an error naming the
+node and the rules that were attempted. A secret ID that *is* named but is not
+present in the store is also a hard failure — resolution never silently falls
+through to a different credential, so a typo can never pick the wrong BMC login.
+
+The server reloads the configured secrets file when a new campaign or job
+initially starts, so credentials added after server startup are available to
+new work without restarting the server. Keep the file path and `MASTER_KEY`
+consistent with the server configuration.
+
+The selected secret ID and the rule that selected it are recorded on the job in
+`status.resolvedSecretID` and `status.credentialSource`. Neither field contains
+credential material.
+
+### Node-name convention
+
+The simplest fleet setup is to store one secret per node, named after the node:
+
+```bash
+go run ./cmd/secret-cli \
+  --secret-id x9000c3s7b1 \
+  --username root \
+  --password initial0 \
+  --store-path ./secrets.json
+```
+
+Jobs and campaigns can then omit `secretID` entirely.
+
+### Optional `credentials` section
+
+Use `spec.credentials` when node names and secret IDs do not line up. Bindings
+are evaluated in declaration order and the first match wins, except that an
+exact node-name match always beats a glob match. Node matching is
+case-insensitive and glob patterns use `*`, `?`, and `[...]`.
+
+```json
+{
+  "spec": {
+    "serverProxyAddress": "10.254.1.20",
+    "credentials": {
+      "bindings": [
+        { "nodes": ["x9000c3s7b1"], "secretID": "lab-bmc" },
+        { "nodes": ["x9000*", "x3000*"], "secretID": "x9000-bmc" }
+      ],
+      "default": "fallback-bmc"
+    },
+    "targets": [
+      { "targetAddress": "x9000c3s7b1" },
+      { "targetAddress": "x9000c3s7b2" },
+      { "targetAddress": "one-off-node", "secretID": "special-bmc" }
+    ],
+    "discovery": { "repository": "127.0.0.1:5000/firmware" }
+  }
+}
+```
+
+A campaign's `credentials` section is inherited by every child job it creates.
+
+### Fleet-wide default
+
+Start the server with a fallback secret used when nothing else resolves:
+
+```bash
+go run ./cmd/server serve \
+  --secrets-file ./secrets.json \
+  --default-secret-id fleet-bmc
+```
+
+A default that is missing from the store logs a warning at startup rather than
+failing the server, so the secret can be added later.
 
 Requirements:
 - `MASTER_KEY` must be set and must be a 64-char hex string (32 bytes decoded; AES-256).
@@ -337,7 +418,7 @@ Alternative (published container image with Podman):
 podman run --replace \
   --network host \
   --name firmware-updater \
-  -v "$(pwd)/secrets.json:/secrets.json:ro" \
+  -v "$(pwd)/secrets.json:/secrets.json:rw" \
   -e MASTER_KEY="${MASTER_KEY}" \
   ghcr.io/openchami/firmware-updater:v0.6.2 \
   serve --port 8090 --secrets-file /secrets.json --database-url="file:hpc.db?cache=shared&_fk=1"

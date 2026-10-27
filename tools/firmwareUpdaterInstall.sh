@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Podman equivalent of docker-compose.yml, for hosts that have podman but not
-# docker-compose or podman-compose. Brings up the same two containers
-# (OCI registry + firmware-updater) on a shared network with the same
-# ports/env/volumes as the compose file.
+# Podman equivalent of docker-compose.yml. Uses a bridge network with DNS
+# disabled; the updater reaches the registry by its container IP address.
 #
 # Usage:
 #   tools/podman-compose.sh up
@@ -36,6 +34,14 @@ require_command() {
     fi
 }
 
+network_error() {
+    echo "error: Podman could not create or inspect network ${NETWORK_NAME}; see its error above." >&2
+    echo "If Podman reports missing CNI plugins, install containernetworking-plugins (Fedora/RHEL) or containernetworking-plugins (Debian/Ubuntu)." >&2
+    echo "Ensure bridge, portmap, firewall, and tuning are executable in Podman's configured CNI plugin directory (shown in its warning)." >&2
+    echo "If they are installed elsewhere, set cni_plugin_dirs in containers.conf to their actual directory, then rerun $0 up." >&2
+    exit 1
+}
+
 wait_for_registry_health() {
     echo "Waiting for registry to become healthy..."
     for _ in $(seq 1 30); do
@@ -52,6 +58,12 @@ wait_for_registry_health() {
 }
 
 cmd_up() {
+    if [[ ! -f "${CERTS_DIR}/registry.crt" && ! -f "${CERTS_DIR}/registry.key" ]]; then
+        mkdir -p "$CERTS_DIR"
+        openssl req -x509 -newkey rsa:4096 -nodes -sha256 -days 365 \
+            -keyout "${CERTS_DIR}/registry.key" \
+            -out "${CERTS_DIR}/registry.crt"
+    fi
     if [[ ! -f "${CERTS_DIR}/registry.crt" || ! -f "${CERTS_DIR}/registry.key" ]]; then
         echo "error: expected TLS cert/key at ${CERTS_DIR}/registry.crt and ${CERTS_DIR}/registry.key" >&2
         exit 1
@@ -65,16 +77,27 @@ cmd_up() {
         exit 1
     fi
 
-    podman network exists "$NETWORK_NAME" || podman network create "$NETWORK_NAME"
+    if podman network exists "$NETWORK_NAME"; then
+        if ! dns_enabled="$(podman network inspect --format '{{.DNSEnabled}}' "$NETWORK_NAME")"; then
+            network_error
+        fi
+        if [[ "$dns_enabled" == "true" ]]; then
+            echo "error: network ${NETWORK_NAME} has DNS enabled; remove it and rerun to recreate it with --disable-dns" >&2
+            exit 1
+        fi
+    else
+        if ! podman network create --disable-dns "$NETWORK_NAME"; then
+            network_error
+        fi
+    fi
+
     podman volume exists "$REGISTRY_VOLUME" || podman volume create "$REGISTRY_VOLUME"
     podman volume exists "$FIRMWARE_VOLUME" || podman volume create "$FIRMWARE_VOLUME"
 
     echo "Starting $REGISTRY_CONTAINER..."
     podman run -d --replace \
         --name "$REGISTRY_CONTAINER" \
-        --hostname registry \
         --network "$NETWORK_NAME" \
-        --network-alias registry \
         --restart unless-stopped \
         -p 5000:5000 \
         -e REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry \
@@ -91,22 +114,26 @@ cmd_up() {
 
     wait_for_registry_health
 
+    registry_ip="$(podman inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$REGISTRY_CONTAINER")"
+    if [[ -z "$registry_ip" || "$registry_ip" == "<no value>" ]]; then
+        echo "error: could not determine the registry container IP address" >&2
+        exit 1
+    fi
+
     echo "Starting $FIRMWARE_CONTAINER..."
     podman run -d --replace \
         --name "$FIRMWARE_CONTAINER" \
-        --hostname firmwareupdater \
         --network "$NETWORK_NAME" \
-        --network-alias firmwareupdater \
         --restart unless-stopped \
-        -p 8080:8080 \
+        -p 8090:8090 \
         -e MASTER_KEY="$MASTER_KEY" \
-        -e FIRMWARE_UPDATER_PORT=8080 \
+        -e FIRMWARE_UPDATER_PORT=8090 \
         -e FIRMWARE_UPDATER_HOST=0.0.0.0 \
-        -e FIRMWARE_UPDATER_REGISTRY_HOST="registry:5000" \
+        -e FIRMWARE_UPDATER_REGISTRY_HOST="${registry_ip}:5000" \
         -e FIRMWARE_UPDATER_REPOSITORY_INSECURE_TLS=true \
         -e FIRMWARE_UPDATER_DEBUG=true \
         -v "${FIRMWARE_VOLUME}:/home/firmware" \
-        -v "${SECRETS_FILE}:/home/firmware/secrets.json:ro" \
+        -v "${SECRETS_FILE}:/home/firmware/secrets.json:rw,U" \
         "$FIRMWARE_IMAGE"
 
     echo "Both containers are running."

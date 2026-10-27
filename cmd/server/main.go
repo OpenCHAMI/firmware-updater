@@ -43,6 +43,7 @@ import (
 	. "github.com/user/firmware-updater/internal/middleware"
 
 	"github.com/openchami/fabrica/pkg/reconcile"
+	"github.com/user/firmware-updater/pkg/credentials"
 	"github.com/user/firmware-updater/pkg/debug"
 	"github.com/user/firmware-updater/pkg/firmwareproxy"
 	"github.com/user/firmware-updater/pkg/reconcilers"
@@ -78,6 +79,10 @@ type Config struct {
 	// Secret store configuration
 	SecretsFile string `mapstructure:"secrets-file"`
 
+	// DefaultSecretID is the fallback BMC credential used when a job or campaign
+	// target resolves no other secret. Empty disables the fallback.
+	DefaultSecretID string `mapstructure:"default-secret-id"`
+
 	// Device profile configuration
 	DeviceProfilesDir string `mapstructure:"device-profiles-dir"`
 }
@@ -103,6 +108,8 @@ func DefaultConfig() *Config {
 		QuayPassword: "",
 		RegistryHost: "",
 		SecretsFile:  "secrets.json",
+
+		DefaultSecretID: "",
 
 		DeviceProfilesDir: "./device-profiles",
 	}
@@ -150,6 +157,7 @@ func init() {
 
 	serveCmd.Flags().String("database-url", "", "Database connection URL")
 	serveCmd.Flags().String("secrets-file", "secrets.json", "Path to encrypted secrets store JSON file")
+	serveCmd.Flags().String("default-secret-id", "", "Secret ID used when a job or campaign target resolves no other BMC credential")
 	serveCmd.Flags().String("device-profiles-dir", "./device-profiles", "Directory to scan for device profile .yaml/.yml files")
 	serveCmd.Flags().String("registry-host", "", "OCI registry host used when listing all firmware image repositories")
 
@@ -194,6 +202,7 @@ func initConfig() {
 	viper.BindEnv("quay_password")
 	viper.BindEnv("registry_host")
 	viper.BindEnv("secrets-file")
+	viper.BindEnv("default-secret-id")
 	viper.BindEnv("redfish_http_timeout")
 
 	// Read config file if it exists
@@ -221,7 +230,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	log.Printf("Starting firmware-updater server...")
 	firmwareproxy.InitAuth(config.QuayUsername, config.QuayPassword)
 
-	if err := initializeSecretStore(config.SecretsFile); err != nil {
+	if err := initializeSecretStore(config.SecretsFile, config.DefaultSecretID); err != nil {
 		return err
 	}
 
@@ -411,7 +420,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func initializeSecretStore(secretFile string) error {
+func initializeSecretStore(secretFile string, defaultSecretID string) error {
 	if err := validateMasterKey(); err != nil {
 		return err
 	}
@@ -435,8 +444,25 @@ func initializeSecretStore(secretFile string) error {
 	if err := secretsruntime.SetStore(store); err != nil {
 		return fmt.Errorf("initialize secret store runtime state: %w", err)
 	}
+	if err := secretsruntime.SetStoreLoader(func() (secrets.SecretStore, error) {
+		return openSecretStore(secretFile)
+	}); err != nil {
+		return fmt.Errorf("configure secret store reload: %w", err)
+	}
 
 	log.Printf("Loaded encrypted secrets store from %s", secretFile)
+
+	credentials.SetServerDefaultSecretID(defaultSecretID)
+	if trimmed := strings.TrimSpace(defaultSecretID); trimmed != "" {
+		// A missing default is a warning, not a fatal: the secret may be added
+		// to the store after the server is already running.
+		if credentials.Exists(store, trimmed) {
+			log.Printf("Default BMC credential secret-id %q configured", trimmed)
+		} else {
+			log.Printf("WARNING: default BMC credential secret-id %q is not present in %s", trimmed, secretFile)
+		}
+	}
+
 	return nil
 }
 

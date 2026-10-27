@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/openchami/fabrica/pkg/fabrica"
 )
@@ -29,29 +30,39 @@ type FirmwareUpdateJob struct {
 }
 
 // FirmwareUpdateJobSpec defines the desired state of FirmwareUpdateJob
+//
+// SecretID is optional: when it is empty the credential is resolved from
+// Credentials, from a secret stored under TargetAddress, or from the
+// server-wide default. See pkg/credentials for the full resolution chain.
 type FirmwareUpdateJobSpec struct {
-	TargetAddress      string         `json:"targetAddress" validate:"required"`
-	SecretID           string         `json:"secretID" validate:"required"`
-	OCIReference       *string        `json:"ociReference,omitempty"`
-	Discovery          *DiscoverySpec `json:"discovery,omitempty"`
-	Targets            []string       `json:"targets,omitempty" validate:"dive,required"`
-	Component          string         `json:"component,omitempty"`
-	ServerProxyAddress string         `json:"serverProxyAddress" validate:"required"`
-	DryRun             bool           `json:"dryrun,omitempty"`
+	TargetAddress      string           `json:"targetAddress" validate:"required"`
+	SecretID           string           `json:"secretID,omitempty"`
+	Credentials        *CredentialsSpec `json:"credentials,omitempty" validate:"omitempty"`
+	OCIReference       *string          `json:"ociReference,omitempty"`
+	Discovery          *DiscoverySpec   `json:"discovery,omitempty"`
+	Targets            []string         `json:"targets,omitempty" validate:"max=1,dive,required"`
+	Component          string           `json:"component,omitempty"`
+	ServerProxyAddress string           `json:"serverProxyAddress" validate:"required"`
+	DryRun             bool             `json:"dryrun,omitempty"`
 }
 
 // FirmwareUpdateJobStatus defines the observed state of FirmwareUpdateJob
 type FirmwareUpdateJobStatus struct {
-	JobState        string `json:"jobState,omitempty"`
-	TaskID          string `json:"taskID,omitempty"`
-	ErrorDetail     string `json:"errorDetail,omitempty"`
-	Message         string `json:"message,omitempty"`
-	CurrentVersion  string `json:"currentVersion,omitempty"`
-	UpdateVersion   string `json:"updateVersion,omitempty"`
-	ResolvedVersion string `json:"-"`
-	ResolvedDigest  string `json:"resolvedDigest,omitempty"`
-	PayloadFilename string `json:"payloadFilename,omitempty"`
-	DeviceProfileID string `json:"deviceProfileID,omitempty"`
+	JobState        string     `json:"jobState,omitempty"`
+	TaskID          string     `json:"taskID,omitempty"`
+	ErrorDetail     string     `json:"errorDetail,omitempty"`
+	Message         string     `json:"message,omitempty"`
+	CurrentVersion  string     `json:"currentVersion,omitempty"`
+	UpdateVersion   string     `json:"updateVersion,omitempty"`
+	ResolvedVersion string     `json:"-"`
+	ResolvedDigest  string     `json:"resolvedDigest,omitempty"`
+	PayloadFilename string     `json:"payloadFilename,omitempty"`
+	DeviceProfileID string     `json:"deviceProfileID,omitempty"`
+	Timeout         *time.Time `json:"timeout,omitempty"`
+	// ResolvedSecretID and CredentialSource record which secret was selected and
+	// which resolution rule selected it. Neither contains credential material.
+	ResolvedSecretID string `json:"resolvedSecretID,omitempty"`
+	CredentialSource string `json:"credentialSource,omitempty"`
 }
 
 // Validate implements custom validation logic for FirmwareUpdateJob
@@ -79,9 +90,16 @@ func (r *FirmwareUpdateJob) Validate(ctx context.Context) error {
 		return fmt.Errorf("exactly one of spec.ociReference or spec.discovery must be provided")
 	}
 
+	if err := r.Spec.Credentials.Validate("spec.credentials"); err != nil {
+		return err
+	}
+
 	// Either Targets or Component must be provided
 	if len(r.Spec.Targets) == 0 && r.Spec.Component == "" {
 		return fmt.Errorf("spec.targets or spec.component must be provided")
+	}
+	if len(r.Spec.Targets) > 1 {
+		return fmt.Errorf("spec.targets must contain exactly one firmware endpoint when provided")
 	}
 
 	// If Targets is provided, validate it

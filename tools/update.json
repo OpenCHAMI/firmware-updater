@@ -1,0 +1,18 @@
+{
+  "metadata": {
+    "name": "FirmwareUpdater-update"
+  },
+  "spec": {
+    "dryrun": true,
+    "serverProxyAddress": "",
+    "discovery": {
+      "repository": ""
+    },
+    "targets": [
+      {
+        "targetAddress": "",
+        "secretID": "default-bmc"
+      }
+    ]
+  }
+}

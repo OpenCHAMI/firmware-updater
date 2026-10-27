@@ -1,11 +1,52 @@
 package firmwareproxy
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
 )
+
+func TestResolvePayloadPreservesFirmwareVersions(t *testing.T) {
+	t.Setenv(envRepositoryInsecureTLS, "true")
+	manifest := ocispec.Manifest{
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: FirmwareBundleArtifactType,
+		Annotations: map[string]string{
+			annotationImageVersion:          "1.2.3",
+			annotationFirmwareVersionString: "1.2.3 build 7",
+		},
+		Layers: []ocispec.Descriptor{{
+			MediaType: "application/octet-stream",
+			Digest:    digest.FromString("firmware"),
+			Size:      8,
+		}},
+	}
+	manifest.SchemaVersion = 2
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+		w.Header().Set("Docker-Content-Digest", digest.FromBytes(body).String())
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	result, err := ResolvePayload(context.Background(), strings.TrimPrefix(server.URL, "https://")+"/firmware:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Version != "1.2.3" || result.VersionString != "1.2.3 build 7" {
+		t.Fatalf("expected firmware version metadata, got %+v", result)
+	}
+}
 
 func TestSelectManifestCandidateLatest(t *testing.T) {
 	candidates := []manifestCandidate{

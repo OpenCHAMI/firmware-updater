@@ -177,6 +177,68 @@ Common `component` values include:
 
 *(Advanced) Manual Target Override:* If auto-discovery fails due to non-standard hardware naming conventions, you can omit the `component` field and supply a `targets` array containing the explicit Redfish OData URIs (e.g., `["/redfish/v1/UpdateService/FirmwareInventory/CustomNodeBIOS"]`).
 
+### Credential Resolution
+
+`secretID` is optional on both jobs and campaign targets. When it is omitted the
+service selects a stored secret by walking an ordered chain and stopping at the
+first rule that produces a secret ID:
+
+| # | Rule | `status.credentialSource` | Input |
+| --- | --- | --- | --- |
+| 1 | Explicit | `explicit` | `spec.secretID` / `spec.targets[].secretID` |
+| 2 | Binding | `binding` | a matching entry in `spec.credentials.bindings` |
+| 3 | Node name | `node-name` | a secret stored under the node's `targetAddress` |
+| 4 | Spec default | `spec-default` | `spec.credentials.default` |
+| 5 | Server default | `server-default` | `--default-secret-id` |
+
+Two rules are strict by design:
+
+* If no rule produces a secret, the job fails immediately with an error naming
+  the node and the rules that were attempted.
+* If a rule names a secret that is not in the store, the job fails rather than
+  falling through to the next rule. A typo can never select the wrong login.
+
+The outcome is recorded on the job as `status.resolvedSecretID` and
+`status.credentialSource`. Neither field contains credential material.
+
+The service reloads its configured secrets file when a new campaign or job
+initially starts. Secrets added after server startup are therefore available to
+new work, provided the file path and `MASTER_KEY` match the server's settings.
+
+**Per-node secrets.** The simplest fleet layout stores one secret per node,
+named after the node, and omits `secretID` from every payload:
+
+```bash
+go run ./cmd/secret-cli \
+  --secret-id 10.10.10.50 \
+  --username root \
+  --password initial0 \
+  --store-path ./secrets.json
+```
+
+**The optional `credentials` section.** Use it when node names and secret IDs do
+not line up. Bindings are evaluated in declaration order and the first match
+wins, except that an exact node-name match always beats a glob match. Matching
+is case-insensitive; patterns support `*`, `?`, and `[...]`.
+
+```json
+"credentials": {
+  "bindings": [
+    { "nodes": ["10.10.10.50"], "secretID": "lab-bmc" },
+    { "nodes": ["10.10.10.*", "10.10.11.*"], "secretID": "x9000-bmc" }
+  ],
+  "default": "fallback-bmc"
+}
+```
+
+A campaign's `credentials` section is inherited by every child job it creates,
+so child jobs resolve exactly as the campaign would.
+
+**Fleet-wide default.** Start the server with `--default-secret-id` (or
+`FIRMWARE_UPDATER_DEFAULT_SECRET_ID`) to supply a last-resort credential. If the
+named secret is missing at startup the server logs a warning and continues, so
+the secret can be added later.
+
 ### Example 1: Discovery Mode Update (Auto-Targeting BMC)
 
 This payload instructs the service to query `quay.io/my-org/firmware/cray-bmc`, find the highest semantic version matching the `x9000` hardware model, and apply it. The service will automatically scan the hardware at `10.10.10.50` to find the URI for the "BMC" component.
@@ -238,6 +300,16 @@ curl -sS http://127.0.0.1:8090/firmwareupdatejobs/firmwareupdatejob-8eab5b0e
 
 The output will display a `status` block indicating the `jobState`. The states progress from `Pending` to `Resolving`, and then to either `InProgress`, `Completed`, or `Failed`. If a job fails, the exact network or Redfish error returned by the target hardware will be recorded in the `errorDetail` field.
 
+Each job, including a campaign child job, operates on exactly one firmware endpoint. Supply a single entry in `spec.targets`, or use `spec.component` to discover one endpoint. Multiple explicit targets are rejected, and discovery that matches multiple endpoints fails rather than updating all of them.
+
+Before dispatching an update, the updater reads the firmware endpoint's `Version` and saves it in `status.currentVersion` as the original version. The expected version is saved in `status.updateVersion`, using the artifact's `dev.fabrica.firmware.versionString` annotation when present, otherwise `org.opencontainers.image.version`. An artifact without an expected version, or an endpoint without a readable original version, fails before dispatch. Dry runs do not perform this verification.
+
+A completed Redfish task alone does not complete the job. The endpoint's firmware version must change from `status.currentVersion` to the expected version string. An unchanged version remains pending; a change to any other version fails immediately, with the endpoint, original, observed, and expected versions in `status.errorDetail`. Version strings are compared exactly after trimming whitespace, including vendor prefixes and build identifiers.
+
+Verification must finish within 30 minutes of starting dispatch by default. Set the server environment variable `FIRMWARE_UPDATER_TIMEOUT` to a positive number of seconds to override this duration; for example, `FIRMWARE_UPDATER_TIMEOUT=3600` allows one hour. Unset, empty, invalid, nonpositive, or overflowing values use the default. This setting is separate from the per-request Redfish HTTP timeout.
+
+If the version remains unchanged, is missing, or cannot be read before that deadline, the job becomes `Failed` with a timeout in `status.errorDetail`. The original version, expected version, and expiration timestamp in `status.timeout` are persisted so retries and server restarts do not reset verification. Changing the environment variable does not change an existing saved timeout. Explicit Redfish task and inventory failures also fail the job.
+
 ## 7. Bulk Cabinet Campaigns
 
 `FirmwareUpdateCampaign` is the bulk orchestration resource for cabinet-wide updates. It captures the shared payload settings once and fans the update out to each target listed in `spec.targets`.
@@ -250,7 +322,7 @@ Campaigns support three submission patterns:
 
 ### Example Campaign Submission
 
-This payload creates a campaign that will spawn one child job for each listed BMC. Each child job receives the same shared payload settings and its own `targetAddress`/`secretID` pair.
+This payload creates a campaign that will spawn one child job for each listed BMC. Each child job receives the same shared payload settings, its own `targetAddress`, and the campaign's `credentials` section. `secretID` is shown here for clarity but may be omitted when the credential resolves by node name, by a `credentials` binding, or from a default.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8090/firmwareupdatecampaigns/ \
@@ -314,6 +386,8 @@ curl -sS http://127.0.0.1:8090/firmwareupdatecampaigns/campaign-1a2b3c4d
 ```
 
 The `status.summary` object contains the total number of child jobs and how many are `completed`, `failed`, or still `pending`. In universal mode this can be larger than the number of input targets because one BMC can expand into multiple component-specific jobs. The `status.childJobs` array shows the linked job UID, target address, and current state for each child job.
+
+The campaign-wide `status.errors` field is an array of error strings, omitted when empty. Each exact error message is recorded only once and retained across reconciliations. Credential and other target discovery errors do not stop the campaign: the affected target is recorded as a failed child job, while the remaining targets continue. A target that fails discovery is not retried within that campaign. Child job failures also contribute to `status.errors`. Failed targets count toward `status.summary.failed`, so a campaign with successful and failed jobs finishes as `CompletedWithErrors` (or `Failed` if every job fails).
 
 Campaign state transitions are:
 
