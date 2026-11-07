@@ -9,7 +9,7 @@ go 1.26.5
 require (
 	entgo.io/ent v0.14.6
 	github.com/OpenCHAMI/magellan v0.5.1
-	github.com/getkin/kin-openapi v0.152.0
+	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/openchami/fabrica v0.4.9
@@ -75,6 +75,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/exp v0.0.0-20240409090435-93d18d7e34b8 // indirect
 	golang.org/x/sync v0.24.0 // indirect
